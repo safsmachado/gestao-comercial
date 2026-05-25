@@ -7667,7 +7667,7 @@ function abrirExportarLote(){
   }
 
   corpo.innerHTML = html;
-  document.getElementById("orc-lote-modal").classList.add("open");
+  document.getElementById("orc-lote-modal").classList.add("act");
   // guardar as prontas para o confirmar
   _lotePreparadas = prontas;
 }
@@ -7687,14 +7687,14 @@ function confirmarExportarLote(){
   try{ if(typeof renderDash==="function") renderDash(); }catch(e){}
   _loteSeleccao = {};
   _lotePreparadas = [];
-  document.getElementById("orc-lote-modal").classList.remove("open");
+  document.getElementById("orc-lote-modal").classList.remove("act");
   render();
   loteAtualizarBotao();
   _toast("✓ "+criadas+" obra(s) criada(s)"+(erros?(" · "+erros+" com erro"):""));
 }
 
 function fecharExportarLote(){
-  document.getElementById("orc-lote-modal").classList.remove("open");
+  document.getElementById("orc-lote-modal").classList.remove("act");
 }
 
 // reabrir uma proposta já transferida (desfaz a ligação, mantém histórico)
@@ -8575,7 +8575,7 @@ function importPreVisualizar(){
     if(s) s.value = d.mapa[idx] || "";
   });
   importValidarResumo();
-  modal.classList.add("open");
+  modal.classList.add("act");
 }
 
 // remapear coluna manualmente
@@ -8713,9 +8713,8 @@ function importConfirmar(){
       });
       actualizadas++;
     } else {
-      window._impSeq = (window._impSeq||0) + 1;
       var novo = {
-        id:"orc_"+Date.now()+"_"+window._impSeq+"_"+Math.random().toString(36).slice(2,6),
+        id:"orc_"+Date.now()+"_"+Math.random().toString(36).slice(2,6),
         criado_em:new Date().toISOString(),
         ultima_alteracao:new Date().toISOString(),
         timeline:[], revisoes:[], documentos:[]
@@ -8746,14 +8745,14 @@ function importConfirmar(){
   });
 
   salvar();
-  document.getElementById("orc-imp-modal").classList.remove("open");
+  document.getElementById("orc-imp-modal").classList.remove("act");
   render();
   _toast("✓ Importação concluída: "+criadas+" novas, "+actualizadas+" actualizadas");
   _impDados = null;
 }
 
 function importFechar(){
-  document.getElementById("orc-imp-modal").classList.remove("open");
+  document.getElementById("orc-imp-modal").classList.remove("act");
   _impDados = null;
 }
 
