@@ -8713,8 +8713,9 @@ function importConfirmar(){
       });
       actualizadas++;
     } else {
+      window._impSeq = (window._impSeq||0) + 1;
       var novo = {
-        id:"orc_"+Date.now()+"_"+Math.random().toString(36).slice(2,6),
+        id:"orc_"+Date.now()+"_"+window._impSeq+"_"+Math.random().toString(36).slice(2,6),
         criado_em:new Date().toISOString(),
         ultima_alteracao:new Date().toISOString(),
         timeline:[], revisoes:[], documentos:[]
