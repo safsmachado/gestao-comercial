@@ -350,6 +350,10 @@ tr.row-atrasada td.tdm{color:var(--dg)!important;font-weight:600}
 tr.row-concluida-ok td{background:rgba(26,171,130,.04)!important}
 tr.row-concluida-ok:hover td{background:rgba(26,171,130,.08)!important}
 tr.row-concluida-ok td.tdm{color:var(--ac2)!important;font-weight:600}
+tr.row-data[draggable="true"]{cursor:grab}
+tr.row-data[draggable="true"]:active{cursor:grabbing}
+.orc-inline-edit{cursor:pointer;border-bottom:1px dashed transparent;transition:border-color .15s}
+.orc-inline-edit:hover{border-bottom-color:var(--ac);background:rgba(59,111,212,.04)}
 .sub-chevron{
   display:inline-block;
   font-size:9px;
@@ -1410,11 +1414,12 @@ nav.nav, .nav{
 // ║  CLOUD MODULE — Supabase Integration                          ║
 // ╚═══════════════════════════════════════════════════════════════╝
 const sb = window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_KEY);
-let _user = null;
+window.sb = sb; // expor para módulos e patches
+let _user = null; window._user = null;
 let _userRole = null;
 let _userPaises = [];   // Países que o user pode aceder (vazio se admin = todos)
 let _historicoLog = []; // Cache do histórico para painel admin
-let _syncing = false;   // Flag para evitar loops em realtime updates
+let _syncing = false; window._syncing = false;   // Flag para evitar loops em realtime updates
 
 // ── UI Helpers ─────────────────────────────────────────────
 function showLoading(){ document.getElementById('loading-overlay').classList.remove('hidden'); }
@@ -1439,7 +1444,7 @@ async function doLogin(ev){
   try {
     const { data, error } = await sb.auth.signInWithPassword({ email, password: pwd });
     if(error) throw error;
-    _user = data.user;
+    _user = data.user; window._user = _user;
     await postLoginSetup();
   } catch(e){
     errEl.textContent = 'Erro: ' + (e.message || 'credenciais inválidas');
@@ -1458,7 +1463,7 @@ async function doLogout(){
 async function checkSession(){
   const { data } = await sb.auth.getSession();
   if(data.session && data.session.user){
-    _user = data.session.user;
+    _user = data.session.user; window._user = _user;
     await postLoginSetup();
     return true;
   }
@@ -1518,6 +1523,8 @@ async function postLoginSetup(){
     await fetchAllDataFromDB();
     // Inicializar UI normalmente
     initUI();
+    // Carregar propostas ORC com dados do Supabase
+    if(window.carregarORC) setTimeout(function(){ window.carregarORC(); }, 100);
     if(window.verificarLembreteBackup)verificarLembreteBackup();
     showToast('✓ Sessão iniciada · ' + _userRole);
   } catch(e){
@@ -1598,6 +1605,16 @@ async function fetchAllDataFromDB(){
   obras = ordenarObras(obras);
   // Reavaliar estados das obras GII conforme a % de execução (em memória)
   if(typeof sincronizarEstados==="function")sincronizarEstados();
+  // Carregar propostas da Orçamentação
+  try{
+    const { data: propDB } = await sb.from('propostas').select('*').eq('arquivada', false).order('data_rececao', {ascending:false});
+    const { data: propArqDB } = await sb.from('propostas').select('*').eq('arquivada', true).order('data_rececao', {ascending:false});
+    if(propDB){
+      // Expor dados para o módulo ORC carregar
+      window._orcPropostasDB = propDB;
+      window._orcArqDB = propArqDB || [];
+    }
+  }catch(e){ console.warn('propostas load error:', e); }
 }
 
 function initUI(){
@@ -1742,12 +1759,12 @@ let _refreshTimer = null;
 async function refreshFromDB(){
   if(_refreshTimer) clearTimeout(_refreshTimer);
   _refreshTimer = setTimeout(async ()=>{
-    _syncing = true;
+    _syncing = true; window._syncing = true;
     try {
       await fetchAllDataFromDB();
       renderTab(); renderExec(); renderDash(); renderArquivadas();
       showToast('🔄 Dados actualizados');
-    } finally { _syncing = false; }
+    } finally { _syncing = false; window._syncing = false; }
   }, 600);
 }
 
@@ -2002,22 +2019,8 @@ async function removerUtilizador(userId, email){
 // e sincronizamos com o Supabase em vez disso.
 // Mantemos localStorage como cache local também (para offline tolerance).
 
-const _origSalvar = window.salvar;
-window.salvar = function(){
-  if(_origSalvar) _origSalvar();
-  if(!_user || _syncing) return;
-  // Sincronizar todas as obras (lazy: só altera o que mudou via upsert por id)
-  // Para evitar muito tráfego, idealmente sincronizamos só a obra alterada.
-  // Mas como o salvar() não diz qual obra mudou, sincronizamos a última editada / actual.
-  if(window._lastObraEdited){
-    syncObraToDB(window._lastObraEdited);
-    window._lastObraEdited = null;
-  }
-};
-const _origSalvarArc = window.salvarArc;
-window.salvarArc = function(){
-  if(_origSalvarArc) _origSalvarArc();
-};
+// sync integrado directamente em salvar() — patch removido
+// sync integrado em salvarArc() — patch removido
 
 // Wrapper: marcar obra como "última editada" para sync
 function markObraDirty(id){
@@ -2026,84 +2029,6 @@ function markObraDirty(id){
 }
 
 // ── INTERCEPTAR FUNÇÕES DE EDIÇÃO ─────────────────────────
-// Patch das funções principais para marcar obra dirty + log histórico
-
-const _origUpdateEstado = window.updateEstado;
-if(_origUpdateEstado){
-  window.updateEstado = function(id, novoEstado){
-    const o = obras.find(x=>x.id===id);
-    const antes = o ? o.estado : null;
-    _origUpdateEstado(id, novoEstado);
-    markObraDirty(id);
-    salvar();
-    logHistorico(id, 'update_estado', 'estado', antes, novoEstado);
-  };
-}
-
-const _origUpdateGrupo = window.updateGrupo;
-if(_origUpdateGrupo){
-  window.updateGrupo = function(id, novoGrupo){
-    const o = obras.find(x=>x.id===id);
-    const antes = o ? o.grupo : null;
-    _origUpdateGrupo(id, novoGrupo);
-    markObraDirty(id);
-    salvar();
-    logHistorico(id, 'update_grupo', 'grupo', antes, novoGrupo);
-  };
-}
-
-const _origUpdatePct = window.updatePct;
-if(_origUpdatePct){
-  window.updatePct = function(id, val){
-    const o = obras.find(x=>x.id===id);
-    const antes = o && o.execucoes ? (o.execucoes[o.execucoes.length-1] || {}).percentagem : null;
-    _origUpdatePct(id, val);
-    markObraDirty(id);
-    salvar();
-    logHistorico(id, 'update_pct', 'execucao', antes, val);
-  };
-}
-
-const _origUpdCod = window.updCod;
-if(_origUpdCod){
-  window.updCod = function(id, val){
-    const o = obras.find(x=>x.id===id);
-    const antes = o ? o.codigo : null;
-    _origUpdCod(id, val);
-    markObraDirty(id);
-    salvar();
-    logHistorico(id, 'update_codigo', 'codigo', antes, val);
-  };
-}
-
-const _origArquivarObra = window.arquivarObra;
-if(_origArquivarObra){
-  window.arquivarObra = function(id){
-    const o = obras.find(x=>x.id===id);
-    if(o) window._lastObraEdited = o;
-    _origArquivarObra(id);
-    if(window._lastObraEdited){ window._lastObraEdited.arquivadaEm = new Date().toISOString(); syncObraToDB(window._lastObraEdited); }
-    logHistorico(id, 'arquivar', null, null, null);
-  };
-}
-
-const _origRestaurarObra = window.restaurarObra;
-if(_origRestaurarObra){
-  window.restaurarObra = function(id){
-    const o = arquivadas.find(x=>x.id===id);
-    if(o){ o.arquivadaEm = null; window._lastObraEdited = o; }
-    _origRestaurarObra(id);
-    if(window._lastObraEdited) syncObraToDB(window._lastObraEdited);
-    logHistorico(id, 'restaurar', null, null, null);
-  };
-}
-
-// Função para criar obra: marcamos dirty depois de chamar o original
-function _wrapCreate(){
-  // Detectado quando form de obra é submetido
-  // O sistema usa onSubmitObra ou similar; interceptamos via observer
-}
-
 // ── BLOQUEAR init() ORIGINAL E REDIRECCIONAR PARA LOGIN ───
 // O init() original carrega de localStorage e renderiza tudo.
 // Aqui substituímos por: verificar sessão -> se ok, postLoginSetup -> senão mostrar login
@@ -2300,8 +2225,23 @@ function verificarLembreteBackup(){
 }
 
 // ── Persistência (localStorage + base de dados) ──────────
-function salvar(){localStorage.setItem("cob_v7",JSON.stringify(obras));bumpVersao();}
-function salvarArc(){localStorage.setItem("cob_v7_arc",JSON.stringify(arquivadas));}
+function salvar(){
+  localStorage.setItem("cob_v7",JSON.stringify(obras));
+  bumpVersao();
+  // Sync Supabase directamente (sem monkey-patch)
+  if(window._user && !window._syncing && window._lastObraEdited){
+    syncObraToDB(window._lastObraEdited).catch(e=>console.error('sync erro:',e));
+    window._lastObraEdited = null;
+  }
+}
+function salvarArc(){
+  localStorage.setItem("cob_v7_arc",JSON.stringify(arquivadas));
+  // Sync Supabase: obra arquivada/restaurada
+  if(window._user && !window._syncing && window._lastObraEdited){
+    syncObraToDB(window._lastObraEdited).catch(e=>console.error('sync arc erro:',e));
+    window._lastObraEdited = null;
+  }
+}
 function salvarCambios(){localStorage.setItem("cob_cambios",JSON.stringify(cambios));if(window.syncCambiosToDB)syncCambiosToDB();}
 function salvarPaises(){localStorage.setItem("cob_paises",JSON.stringify(paisesConfig));if(window.syncPaisesToDB)syncPaisesToDB();}
 function salvarLocs(){localStorage.setItem("cob_locs",JSON.stringify(localidadesConfig));if(window.syncLocalidadesToDB)syncLocalidadesToDB();}
@@ -2312,6 +2252,15 @@ async function syncConfigToDB(chave,valor){
     await sb.from('app_config').upsert([{chave,valor,atualizado_em:new Date().toISOString()}],{onConflict:'chave'});
   }catch(e){/* tabela pode não existir ainda; localStorage mantém */}
 }
+
+// Expor funções de sync para patches externos
+window.syncObraToDB = syncObraToDB;
+window.syncDeleteObraFromDB = syncDeleteObraFromDB;
+window.syncCambiosToDB = syncCambiosToDB;
+window.syncPaisesToDB = syncPaisesToDB;
+window.syncLocalidadesToDB = syncLocalidadesToDB;
+window.syncTiposToDB = syncTiposToDB;
+window.markObraDirty = markObraDirty;
 
 // ── Ordenação ─────────────────────────────────────────────
 const ORDEM_ESTADOS={"Adjudicado":1,"Em Curso":2,"Suspenso":3,"Concluído":4,
@@ -2332,9 +2281,60 @@ function ordenarObras(lista){
     if(oe!==0)return oe;
     // 3º grupo
     if(a.grupo!==b.grupo)return a.grupo<b.grupo?-1:1;
-    // 4º designação
+    // 4º ordem manual (drag & drop), se definida
+    var ordA = (typeof a.ordem==="number")?a.ordem:9999;
+    var ordB = (typeof b.ordem==="number")?b.ordem:9999;
+    if(ordA!==ordB) return ordA-ordB;
+    // 5º designação
     return(a.designacao||"").localeCompare(b.designacao||"","pt");
   });
+}
+
+// ── Drag & Drop: reordenação manual de obras ──────────────────
+let _obraDragId = null;
+function obraDragStart(e, id){
+  _obraDragId = id;
+  e.dataTransfer.effectAllowed = "move";
+  if(e.target && e.target.style) e.target.style.opacity = "0.4";
+}
+function obraDragOver(e){
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "move";
+  var tr = e.target.closest("tr");
+  if(tr) tr.style.borderTop = "2px solid var(--ac)";
+}
+function obraDragEnd(e){
+  if(e.target && e.target.style) e.target.style.opacity = "";
+  document.querySelectorAll("tr").forEach(function(tr){ tr.style.borderTop=""; });
+}
+function obraDrop(e, alvoId){
+  e.preventDefault();
+  document.querySelectorAll("tr").forEach(function(tr){ tr.style.borderTop=""; });
+  if(!_obraDragId || _obraDragId===alvoId) return;
+  var origem = obras.find(function(x){return x.id===_obraDragId;});
+  var alvo = obras.find(function(x){return x.id===alvoId;});
+  if(!origem || !alvo) return;
+  // Só permite reordenar dentro do mesmo país + estado (mesmo grupo visual)
+  if(origem.pais!==alvo.pais || origem.estado!==alvo.estado){
+    if(typeof showToast==="function") showToast("Só pode reordenar dentro do mesmo país e estado");
+    _obraDragId = null;
+    return;
+  }
+  // Atribuir ordem sequencial às obras do mesmo grupo conforme posição actual
+  var grupo = obras.filter(function(x){return x.pais===origem.pais && x.estado===origem.estado;});
+  grupo = ordenarObras(grupo);
+  // remover origem da posição actual
+  var semOrigem = grupo.filter(function(x){return x.id!==origem.id;});
+  // encontrar índice do alvo e inserir origem antes dele
+  var idxAlvo = semOrigem.findIndex(function(x){return x.id===alvoId;});
+  semOrigem.splice(idxAlvo, 0, origem);
+  // reatribuir ordem
+  semOrigem.forEach(function(o, i){ o.ordem = i; });
+  _obraDragId = null;
+  window._lastObraEdited = origem;
+  salvar();
+  renderTab();
+  if(typeof showToast==="function") showToast("✓ Ordem actualizada");
 }
 
 // ── Estados por grupo ─────────────────────────────────────
@@ -4159,7 +4159,7 @@ function renderGrupoTabela(lista,grupo){
         }
         return"row-data";
       })();
-      obraRows+=`<tr data-pais="${pais}" class="${rowClass}">
+      obraRows+=`<tr data-pais="${pais}" data-oid="${o.id}" class="${rowClass}" draggable="true" ondragstart="obraDragStart(event,'${o.id}')" ondragover="obraDragOver(event)" ondrop="obraDrop(event,'${o.id}')" ondragend="obraDragEnd(event)">
           <td>${tiSpan}</td>
           <td>${tObraSpan}</td>
           <td class="td-des" title="${o.designacao}">${label}</td>
@@ -4201,7 +4201,7 @@ function renderGrupoTabela(lista,grupo){
         }
         return"row-data";
       })();
-      obraRows+=`<tr data-pais="${pais}" class="${rowClass}">
+      obraRows+=`<tr data-pais="${pais}" data-oid="${o.id}" class="${rowClass}" draggable="true" ondragstart="obraDragStart(event,'${o.id}')" ondragover="obraDragOver(event)" ondrop="obraDrop(event,'${o.id}')" ondragend="obraDragEnd(event)">
           <td>${codInp}</td>
           <td>${tiSpan}</td>
           <td>${tObraSpan}</td>
@@ -4481,8 +4481,12 @@ function _arcUpdateBulk(){
 function arcRestaurarSel(){
   const ids=Object.keys(_arcSel).filter(k=>_arcSel[k]);
   if(!ids.length)return;
-  ids.forEach(id=>{const i=arquivadas.findIndex(x=>x.id===id);if(i>=0){obras.push(arquivadas[i]);arquivadas.splice(i,1);}});
-  obras=ordenarObras(obras);_arcSel={};salvar();salvarArc();renderTab('obras');renderExec();renderDash();renderArquivadas();
+  const moved=[];
+  ids.forEach(id=>{const i=arquivadas.findIndex(x=>x.id===id);if(i>=0){const o=arquivadas[i];o.arquivadaEm=null;obras.push(o);arquivadas.splice(i,1);moved.push(o);}});
+  obras=ordenarObras(obras);_arcSel={};salvar();salvarArc();
+  // Sync cada obra restaurada individualmente
+  if(window.syncObraToDB&&_user&&!_syncing)moved.forEach(o=>syncObraToDB(o));
+  renderTab('obras');renderExec();renderDash();renderArquivadas();
   showToast('↩ '+ids.length+' obra'+(ids.length!==1?'s':'')+' restaurada'+(ids.length!==1?'s':''));
 }
 function arcEliminarSel(){
@@ -4490,13 +4494,20 @@ function arcEliminarSel(){
   if(!ids.length)return;
   if(!confirm('Eliminar definitivamente '+ids.length+' obra'+(ids.length!==1?'s':'')+' do arquivo? Esta acção é irreversível.'))return;
   arquivadas=arquivadas.filter(x=>!ids.includes(x.id));
-  _arcSel={};salvarArc();renderArquivadas();
+  _arcSel={};salvarArc();
+  // Eliminar no Supabase
+  if(window.syncDeleteObraFromDB&&_user&&!_syncing)ids.forEach(id=>syncDeleteObraFromDB(id));
+  renderArquivadas();
   showToast('🗑 '+ids.length+' obra'+(ids.length!==1?'s':'')+' eliminada'+(ids.length!==1?'s':''));
 }
 function arcEliminarTodas(){
   if(!arquivadas.length)return;
+  const ids=arquivadas.map(o=>o.id);
   if(!confirm('Eliminar TODAS as '+arquivadas.length+' obras do arquivo? Esta acção é irreversível.'))return;
-  arquivadas=[];_arcSel={};salvarArc();renderArquivadas();
+  arquivadas=[];_arcSel={};salvarArc();
+  // Eliminar no Supabase
+  if(window.syncDeleteObraFromDB&&_user&&!_syncing)ids.forEach(id=>syncDeleteObraFromDB(id));
+  renderArquivadas();
   showToast('🗑 Arquivo de obras limpo');
 }
 function renderArquivadas(){
@@ -4985,6 +4996,7 @@ function saveObra(e){
   if(id){const i=obras.findIndex(x=>x.id===id);obras[i]=o;}
   else obras.push(o);
   obras=ordenarObras(obras);
+  window._lastObraEdited=o;  // marcar para sync
   salvar();cancelForm();irPara("obras");renderTab();renderDash();
 }
 function editObra(id){
@@ -5780,6 +5792,88 @@ try {
   console.error("ERRO no init():", e);
   document.body.innerHTML = '<div style="padding:40px;color:#fff;font-family:monospace;background:#0f1117;min-height:100vh"><h2 style="color:#e05c5c">Erro ao carregar o sistema</h2><pre style="background:#181c27;padding:20px;border-radius:8px;overflow:auto">'+e.message+'\n\n'+e.stack+'</pre><button onclick="localStorage.clear();location.reload()" style="margin-top:20px;padding:10px 20px;background:#4f8ef7;color:#fff;border:none;border-radius:6px;cursor:pointer">Limpar dados e recarregar</button></div>';
 }
+
+
+// ═══ PATCHES (instalados após definição das funções) ═══
+// Patch das funções principais para marcar obra dirty + log histórico
+
+const _origUpdateEstado = window.updateEstado;
+if(_origUpdateEstado){
+  window.updateEstado = function(id, novoEstado){
+    const o = obras.find(x=>x.id===id);
+    const antes = o ? o.estado : null;
+    _origUpdateEstado(id, novoEstado);
+    markObraDirty(id);
+    salvar();
+    logHistorico(id, 'update_estado', 'estado', antes, novoEstado);
+  };
+}
+
+const _origUpdateGrupo = window.updateGrupo;
+if(_origUpdateGrupo){
+  window.updateGrupo = function(id, novoGrupo){
+    const o = obras.find(x=>x.id===id);
+    const antes = o ? o.grupo : null;
+    _origUpdateGrupo(id, novoGrupo);
+    markObraDirty(id);
+    salvar();
+    logHistorico(id, 'update_grupo', 'grupo', antes, novoGrupo);
+  };
+}
+
+const _origUpdatePct = window.updatePct;
+if(_origUpdatePct){
+  window.updatePct = function(id, val){
+    const o = obras.find(x=>x.id===id);
+    const antes = o && o.execucoes ? (o.execucoes[o.execucoes.length-1] || {}).percentagem : null;
+    _origUpdatePct(id, val);
+    markObraDirty(id);
+    salvar();
+    logHistorico(id, 'update_pct', 'execucao', antes, val);
+  };
+}
+
+const _origUpdCod = window.updCod;
+if(_origUpdCod){
+  window.updCod = function(id, val){
+    const o = obras.find(x=>x.id===id);
+    const antes = o ? o.codigo : null;
+    _origUpdCod(id, val);
+    markObraDirty(id);
+    salvar();
+    logHistorico(id, 'update_codigo', 'codigo', antes, val);
+  };
+}
+
+const _origArquivarObra = window.arquivarObra;
+if(_origArquivarObra){
+  window.arquivarObra = function(id){
+    const o = obras.find(x=>x.id===id);
+    if(o) window._lastObraEdited = o;
+    _origArquivarObra(id);
+    if(window._lastObraEdited){ window._lastObraEdited.arquivadaEm = new Date().toISOString(); syncObraToDB(window._lastObraEdited); }
+    logHistorico(id, 'arquivar', null, null, null);
+  };
+}
+
+const _origRestaurarObra = window.restaurarObra;
+if(_origRestaurarObra){
+  window.restaurarObra = function(id){
+    const o = arquivadas.find(x=>x.id===id);
+    if(o){ o.arquivadaEm = null; window._lastObraEdited = o; }
+    _origRestaurarObra(id);
+    if(window._lastObraEdited) syncObraToDB(window._lastObraEdited);
+    logHistorico(id, 'restaurar', null, null, null);
+  };
+}
+
+// Função para criar obra: marcamos dirty depois de chamar o original
+function _wrapCreate(){
+  // Detectado quando form de obra é submetido
+  // O sistema usa onSubmitObra ou similar; interceptamos via observer
+}
+
+
 </script>
 <div id="exp-overlay"><div class="exp-spinner"></div><div class="exp-msg" id="exp-msg">A gerar...</div></div>
 <!-- ════════════════════════════════════════════════════════════════════ -->
@@ -6044,6 +6138,7 @@ try {
     <div class="orc-actions">
       <button class="orc-btn sec" id="orc-btn-importar" onclick="ORC.importAbrir()">📥 Importar Excel</button>
       <button class="orc-btn sec" id="orc-btn-excel" onclick="ORC.exportarExcel()">📊 Excel</button>
+      <button class="orc-btn sec" id="orc-btn-aplicar-def" title="Preencher campos vazios de todas as propostas com as predefinições (ex: Concorrente = Sá Machado)" onclick="ORC.aplicarPredefinicoes()">⚙ Aplicar predefinições</button>
       <button class="orc-btn" id="orc-btn-nova">+ Nova Proposta</button>
       <input type="file" id="orc-imp-file" accept=".xlsx,.xls,.csv" style="display:none" onchange="ORC.impFicheiro(event)">
     </div>
@@ -6098,11 +6193,12 @@ try {
 
 <!-- ═══════════════════  SEPARADOR ARQUIVO  ═══════════════════ -->
 <div class="panel" id="panel-arquivo">
-  <div class="shd"><div><h2>Arquivo Comercial</h2><p>Propostas arquivadas — histórico completo, restauráveis</p></div></div>
+  <div class="shd"><div><h2>Arquivo Comercial</h2><p>Propostas arquivadas — histórico completo, restauráveis</p></div><button class="orc-btn dg sm" onclick="ORC.arqEliminarTodas()" title="Eliminar definitivamente todas as propostas do arquivo">🗑 Eliminar todas</button></div>
   <div class="orc-kpis" id="orc-arq-kpis" style="margin-bottom:18px"></div>
   <div class="orc-filtros">
     <input type="text" class="orc-search" id="orc-arq-busca" placeholder="🔍 Pesquisar no arquivo..." oninput="ORC.arqBusca(this.value)">
   </div>
+
   <div class="orc-tbl-wrap">
     <table class="orc-tbl" id="orc-arq-tbl">
       <thead>
@@ -6393,12 +6489,40 @@ var ordenacao = {campo:"data_rececao", dir:-1};
 var filtros = {busca:"", estado:"", pais:"", prio:""};
 
 // ── Persistência (localStorage) ──────────────────────────────
-function carregar(){
-  try{ propostas = JSON.parse(localStorage.getItem(STORAGE_KEY)||"[]"); }
-  catch(e){ propostas = []; }
+async function carregar(){
+  // Se vieram dados do Supabase pré-carregados, usar esses
+  if(window._orcPropostasDB && window._orcPropostasDB.length > 0){
+    propostas = window._orcPropostasDB.map(_fromDB);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(propostas));
+  } else if(window._orcPropostasDB !== undefined){
+    // Supabase respondeu mas vazio — usar localStorage
+    try{ propostas = JSON.parse(localStorage.getItem(STORAGE_KEY)||"[]"); }
+    catch(e){ propostas = []; }
+  } else {
+    // Sem Supabase — usar localStorage
+    try{ propostas = JSON.parse(localStorage.getItem(STORAGE_KEY)||"[]"); }
+    catch(e){ propostas = []; }
+  }
+  window._orcPropostasDB = undefined;
+
+  // Arquivadas: sempre do localStorage (geridas por carregarArquivo)
+  // Supabase arquivadas carregadas separadamente se disponíveis
+  if(window._orcArqDB && window._orcArqDB.length > 0){
+    arquivadas = window._orcArqDB.map(_fromDB);
+    localStorage.setItem(STORAGE_KEY_ARQ, JSON.stringify(arquivadas));
+  } else {
+    try{ arquivadas = JSON.parse(localStorage.getItem(STORAGE_KEY_ARQ)||"[]"); }
+    catch(e){ arquivadas = []; }
+  }
+  window._orcArqDB = undefined;
+
   if(!Array.isArray(propostas)) propostas = [];
-  // Se não houver propostas, injectar dados de teste
-  if(propostas.length === 0){ _injectarDadosTeste(); salvar(); }
+  if(!Array.isArray(arquivadas)) arquivadas = [];
+  // Só injectar dados de teste se não houver nada E sem utilizador autenticado
+  if(propostas.length === 0 && !window._user){ _injectarDadosTeste(); }
+  // Actualizar UI se já inicializada
+  if(typeof render === 'function') render();
+  if(typeof renderArquivo === 'function') renderArquivo();
 }
 
 function _injectarDadosTeste(){
@@ -6568,10 +6692,88 @@ function _injectarDadosTeste(){
       documentos:[], criado_em:ts(-200), ultima_alteracao:ts(-150), revisao_atual:"V1", num_revisoes:1, obra_id:"", obra_codigo:"" }
   ];
 }
+function editarCelula(td){
+  if(!podeEditar()){ _toast("Sem permissão.", true); return; }
+  if(td._editando) return;
+  td._editando = true;
+  var pid = td.getAttribute("data-pid");
+  var campo = td.getAttribute("data-campo");
+  var p = propostas.find(function(x){return x.id===pid;});
+  if(!p){ td._editando=false; return; }
+  var valorActual = p[campo]||"";
+  var input = document.createElement("input");
+  input.type = "text";
+  input.value = valorActual;
+  input.style.cssText = "width:100%;border:1px solid var(--ac);border-radius:3px;padding:2px 4px;font-size:inherit;font-family:inherit";
+
+  // Criar datalist próprio (fora do modal, sempre acessível)
+  if(campo==="concorrente"){
+    var dlId = "orc-dl-inline-conc";
+    var dl = document.getElementById(dlId);
+    if(!dl){ dl = document.createElement("datalist"); dl.id = dlId; document.body.appendChild(dl); }
+    var nomes = (window.entListaActivos) ? window.entListaActivos("concorrentes") : [];
+    // garantir que "Sá Machado" está sempre disponível
+    if(nomes.indexOf("Sá Machado")===-1) nomes.unshift("Sá Machado");
+    dl.innerHTML = nomes.map(function(n){ return '<option value="'+esc(n)+'">'; }).join("");
+    input.setAttribute("list", dlId);
+  } else if(campo==="cliente"){
+    var dlId2 = "orc-dl-inline-cli";
+    var dl2 = document.getElementById(dlId2);
+    if(!dl2){ dl2 = document.createElement("datalist"); dl2.id = dlId2; document.body.appendChild(dl2); }
+    // clientes existentes nas propostas
+    var clientes = [];
+    propostas.forEach(function(x){ if(x.cliente && clientes.indexOf(x.cliente)===-1) clientes.push(x.cliente); });
+    clientes.sort(function(a,b){return a.localeCompare(b,"pt");});
+    dl2.innerHTML = clientes.map(function(n){ return '<option value="'+esc(n)+'">'; }).join("");
+    input.setAttribute("list", dlId2);
+  }
+
+  td.innerHTML = "";
+  td.appendChild(input);
+  input.focus();
+  input.select();
+  function guardar(){
+    var novo = input.value.trim();
+    p[campo] = novo;
+    td._editando = false;
+    window._lastPropostaEdited = p;
+    salvar();
+    render();
+  }
+  input.addEventListener("blur", guardar);
+  input.addEventListener("keydown", function(e){
+    if(e.key==="Enter"){ input.blur(); }
+    else if(e.key==="Escape"){ td._editando=false; render(); }
+  });
+}
+function aplicarPredefinicoes(){
+  if(!podeEditar()){ _toast("Sem permissão.", true); return; }
+  var n = 0;
+  propostas.forEach(function(p){
+    // Concorrente predefinido = Sá Machado (se vazio)
+    if(!p.concorrente || p.concorrente.trim()===""){ p.concorrente = "Sá Machado"; n++; }
+    // País predefinido (1º da lista) se vazio
+    var paises = getPaises();
+    if((!p.pais||p.pais==="") && paises.length){ p.pais = paises[0]; }
+  });
+  if(n>0){
+    // marcar para sync (sincroniza só a última; para todas, usar loop)
+    if(window._user && window.sb){
+      propostas.forEach(function(p){ if(window.syncPropostaToDB) syncPropostaToDB(p).catch(function(e){console.error(e);}); });
+    }
+    salvar();
+    render();
+    _toast("✓ "+n+" proposta(s) actualizada(s) com predefinições");
+  } else {
+    _toast("Todas as propostas já têm os campos preenchidos");
+  }
+}
 function salvar(){
   localStorage.setItem(STORAGE_KEY, JSON.stringify(propostas));
-  // Hook futuro para Supabase (Fase final):
-  // if(window.syncOrcToDB) window.syncOrcToDB();
+  if(window._lastPropostaEdited && window._user && window.sb){
+    syncPropostaToDB(window._lastPropostaEdited).catch(function(e){console.error('orc sync:',e);});
+    window._lastPropostaEdited = null;
+  }
 }
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -6688,6 +6890,7 @@ function abrirModal(id){
     });
     document.getElementById("orc-estado").value = "Em Preparação";
     document.getElementById("orc-prioridade").value = "Média";
+    document.getElementById("orc-concorrente").value = "Sá Machado";
     preencherLocalidades("", "");
   }
   document.getElementById("orc-modal").classList.add("act");
@@ -6742,6 +6945,7 @@ function guardar(){
   } else {
     propostas.push(obj);
   }
+  window._lastPropostaEdited = obj;
   salvar();
   fecharModal();
   render();
@@ -6765,8 +6969,62 @@ function carregarArquivo(){
 }
 function salvarArquivo(){
   localStorage.setItem(STORAGE_KEY_ARQ, JSON.stringify(arquivadas));
-  // SUPABASE: sincronizar arquivo no futuro
+  if(window._lastPropostaEdited && window._user && window.sb){
+    syncPropostaToDB(window._lastPropostaEdited).catch(function(e){console.error('orc arc sync:',e);});
+    window._lastPropostaEdited = null;
+  }
 }
+// ── Sync Supabase ──────────────────────────────────────────
+function _toDB(p){
+  return {
+    id: p.id, codigo: p.codigo||null, designacao: p.designacao,
+    cliente: p.cliente||null, dono: p.dono||null, pais: p.pais||null,
+    localidade: p.localidade||null, concorrente: p.concorrente||null,
+    responsavel: p.responsavel||null, gestor: p.gestor||null,
+    estado: p.estado||null, prioridade: p.prioridade||null,
+    valor_estimado: p.valor_estimado||0, valor_proposta: p.valor_proposta||0,
+    valor_revisto: p.valor_revisto||null, margem: p.margem||null,
+    probabilidade: p.probabilidade||null, prazo: p.prazo||null,
+    data_rececao: p.data_rececao||null, data_limite: p.data_limite||null,
+    data_entrega: p.data_entrega||null, data_decisao: p.data_decisao||null,
+    observacoes: p.observacoes||null,
+    timeline: p.timeline||[], revisoes: p.revisoes||[], documentos: p.documentos||[],
+    obra_id: p.obra_id||null, obra_codigo: p.obra_codigo||null,
+    arquivada: !!p.arquivadaEm, arquivada_em: p.arquivadaEm||null,
+    atualizado_por: window._user ? window._user.id : null
+  };
+}
+function _fromDB(r){
+  return {
+    id:r.id, codigo:r.codigo, designacao:r.designacao,
+    cliente:r.cliente, dono:r.dono, pais:r.pais, localidade:r.localidade,
+    concorrente:r.concorrente, responsavel:r.responsavel, gestor:r.gestor,
+    estado:r.estado, prioridade:r.prioridade,
+    valor_estimado:r.valor_estimado||0, valor_proposta:r.valor_proposta||0,
+    valor_revisto:r.valor_revisto, margem:r.margem, probabilidade:r.probabilidade,
+    prazo:r.prazo, data_rececao:r.data_rececao, data_limite:r.data_limite,
+    data_entrega:r.data_entrega, data_decisao:r.data_decisao,
+    observacoes:r.observacoes,
+    timeline:r.timeline||[], revisoes:r.revisoes||[], documentos:r.documentos||[],
+    obra_id:r.obra_id, obra_codigo:r.obra_codigo,
+    arquivadaEm: r.arquivada_em||null
+  };
+}
+async function syncPropostaToDB(p){
+  if(!window._user || !window.sb) return;
+  var payload = _toDB(p);
+  var res = await window.sb.from('propostas').upsert(payload, {onConflict:'id'});
+  if(res.error){ console.error('propostas sync error:', res.error); }
+}
+async function deletePropostaFromDB(id){
+  if(!window._user || !window.sb) return;
+  await window.sb.from('propostas').delete().eq('id', id);
+}
+// Expor para chamadas externas
+window.syncPropostaToDB = syncPropostaToDB;
+window.deletePropostaFromDB = deletePropostaFromDB;
+window.carregarORC = carregar;
+
 
 // arquivar: tira das activas, mantém todo o histórico, mete no arquivo
 // Se houver propostas seleccionadas (checkboxes), arquiva TODAS as seleccionadas.
@@ -6795,6 +7053,10 @@ function arquivarProposta(id){
     propostas = propostas.filter(function(x){return !_loteSeleccao[x.id];});
     _loteSeleccao = {};
     salvar(); salvarArquivo();
+    // Sync bulk ao Supabase
+    if(window._user && window.sb && window.syncPropostaToDB){
+      arquivadas.slice(-nArq).forEach(function(pp){ syncPropostaToDB(pp).catch(function(e){console.error(e);}); });
+    }
     render();
     if(typeof renderArquivo==="function") renderArquivo();
     _toast("✓ "+nArq+" proposta(s) arquivada(s)");
@@ -6813,6 +7075,7 @@ function arquivarProposta(id){
   p.arquivada_em = new Date().toISOString();
   propostas = propostas.filter(function(x){return x.id!==id;});
   arquivadas.push(p);
+  window._lastPropostaEdited = p;
   salvar(); salvarArquivo();
   // se o detalhe estava aberto nesta proposta, fechar
   if(detalheAtual===id){ try{ fecharDetalhe(); }catch(e){} }
@@ -6835,6 +7098,7 @@ function restaurarProposta(id){
   delete p.arquivada_em;
   arquivadas = arquivadas.filter(function(x){return x.id!==id;});
   propostas.push(p);
+  window._lastPropostaEdited = p;
   salvar(); salvarArquivo();
   render();
   if(typeof renderArquivo==="function") renderArquivo();
@@ -6846,6 +7110,59 @@ var _arqSel = {};
 function arqToggle(id, marcado){
   if(marcado) _arqSel[id] = true;
   else delete _arqSel[id];
+  _arqAtualizarBarra();
+}
+function _arqAtualizarBarra(){
+  var ids = Object.keys(_arqSel);
+  var bar = document.getElementById('orc-arq-bulk-bar');
+  var lbl = document.getElementById('orc-arq-bulk-lbl');
+  var chkAll = document.getElementById('orc-arq-chk-all');
+  if(bar) bar.style.display = ids.length > 0 ? 'flex' : 'none';
+  if(lbl) lbl.textContent = ids.length + ' proposta' + (ids.length !== 1 ? 's' : '') + ' seleccionada' + (ids.length !== 1 ? 's' : '');
+  if(chkAll) chkAll.indeterminate = ids.length > 0 && ids.length < arquivadas.length;
+  if(chkAll) chkAll.checked = arquivadas.length > 0 && ids.length === arquivadas.length;
+}
+function arqSelAll(checked){
+  _arqSel = {};
+  if(checked) arquivadas.forEach(function(p){ _arqSel[p.id] = true; });
+  // Actualizar apenas as checkboxes visíveis no DOM (sem re-render completo)
+  document.querySelectorAll('#orc-arq-tbody input[type="checkbox"][data-id]').forEach(function(cb){
+    cb.checked = checked;
+  });
+  _arqAtualizarBarra();
+}
+function arqRestaurarSel(){
+  var ids = Object.keys(_arqSel);
+  if(!ids.length) return;
+  if(!confirm('Restaurar ' + ids.length + ' proposta' + (ids.length!==1?'s':'') + ' para a Orçamentação activa?')) return;
+  ids.forEach(function(id){ restaurarProposta(id); });
+  _arqSel = {};
+  _arqAtualizarBarra();
+}
+function arqEliminarSel(){
+  var ids = Object.keys(_arqSel);
+  if(!ids.length) return;
+  if(!confirm('Eliminar DEFINITIVAMENTE ' + ids.length + ' proposta' + (ids.length!==1?'s':'') + '? Irreversível.')) return;
+  arquivadas = arquivadas.filter(function(x){ return !_arqSel[x.id]; });
+  if(window._user && window.sb && window.deletePropostaFromDB){
+    ids.forEach(function(id){ deletePropostaFromDB(id).catch(function(e){console.error(e);}); });
+  }
+  salvarArquivo();
+  _arqSel = {};
+  _arqAtualizarBarra();
+  renderArquivo();
+}
+function arqEliminarTodas(){
+  if(!arquivadas.length){ _toast("O arquivo já está vazio"); return; }
+  var ids = arquivadas.map(function(p){ return p.id; });
+  if(!confirm('Eliminar DEFINITIVAMENTE todas as ' + ids.length + ' propostas do arquivo?\nEsta acção é irreversível.')) return;
+  arquivadas = [];
+  if(window._user && window.sb && window.deletePropostaFromDB){
+    ids.forEach(function(id){ deletePropostaFromDB(id).catch(function(e){console.error(e);}); });
+  }
+  salvarArquivo();
+  renderArquivo();
+  _toast("🗑 Arquivo limpo — " + ids.length + " proposta(s) eliminada(s)");
 }
 
 // eliminar definitivamente (só a partir do arquivo)
@@ -7255,10 +7572,10 @@ function _linhaProposta(p, editavel){
     chkCell+
     '<td>'+esc(p.codigo||"—")+'</td>'+
     '<td class="orc-td-des" title="'+esc(p.designacao)+'">'+esc(p.designacao||"—")+'</td>'+
-    '<td class="orc-td-cli orc-hide-sm">'+esc(p.cliente||"—")+'</td>'+
+    '<td class="orc-td-cli orc-hide-sm orc-inline-edit" title="Clicar para editar" data-pid="'+esc(p.id)+'" data-campo="cliente" onclick="event.stopPropagation();ORC.editarCelula(this)">'+esc(p.cliente||"—")+'</td>'+
     '<td class="orc-hide-sm" title="'+esc(p.responsavel||"")+'"><span class="orc-resp">'+esc(resp)+'</span></td>'+
     '<td class="orc-hide-sm">'+esc(p.pais||"—")+'</td>'+
-    '<td class="orc-hide-sm orc-td-cli" title="'+esc(p.concorrente||"")+'">'+esc(p.concorrente||"—")+'</td>'+
+    '<td class="orc-hide-sm orc-td-cli orc-inline-edit" title="Clicar para editar" data-pid="'+esc(p.id)+'" data-campo="concorrente" onclick="event.stopPropagation();ORC.editarCelula(this)">'+esc(p.concorrente||"—")+'</td>'+
     '<td><span class="orc-badge '+estCls+'">'+esc(p.estado||"—")+'</span></td>'+
     '<td>'+(valor?fmtEUR(valor):"—")+'</td>'+
     '<td class="orc-hide-sm">'+(p.data_limite?fmtData(p.data_limite):"—")+'</td>'+
@@ -7337,12 +7654,12 @@ function renderArquivo(){
         var acoes = '<button class="orc-btn sm" onclick="ORC.detalhe(\''+p.id+'\')">Abrir</button>';
         if(editavel) acoes += ' <button class="orc-btn ac2 sm" title="Restaurar" onclick="ORC.restaurar(\''+p.id+'\')">↩ Restaurar</button>';
         if(editavel) acoes += ' <button class="orc-btn dg sm" title="Eliminar definitivamente" onclick="ORC.eliminarArq(\''+p.id+'\')">×</button>';
-        var chkArq = editavel ? '<td style="text-align:center"><input type="checkbox"'+(_arqSel[p.id]?" checked":"")+' onclick="ORC.arqToggle(\''+p.id+'\',this.checked)"></td>' : '<td></td>';
+        var chkArq = editavel ? '<td style="text-align:center"><input type="checkbox" data-id="'+p.id+'"'+(_arqSel[p.id]?" checked":"")+' onclick="ORC.arqToggle(\''+p.id+'\',this.checked)"></td>' : '<td></td>';
         html += '<tr class="orc-prop-row">'+
           chkArq+
           '<td>'+esc(p.codigo||"—")+'</td>'+
           '<td class="orc-td-des" title="'+esc(p.designacao)+'">'+esc(p.designacao||"—")+'</td>'+
-          '<td class="orc-td-cli orc-hide-sm">'+esc(p.cliente||"—")+'</td>'+
+          '<td class="orc-td-cli orc-hide-sm orc-inline-edit" title="Clicar para editar" data-pid="'+esc(p.id)+'" data-campo="cliente" onclick="event.stopPropagation();ORC.editarCelula(this)">'+esc(p.cliente||"—")+'</td>'+
           '<td class="orc-hide-sm">'+esc(p.pais||"—")+'</td>'+
           '<td><span class="orc-badge '+(ESTADO_CLASSE[p.estado]||"orc-est-prep")+'">'+esc(p.estado||"—")+'</span></td>'+
           '<td>'+(valor?fmtEUR(valor):"—")+'</td>'+
@@ -8397,7 +8714,45 @@ function renderFolhaResultados(p){
     });
     html += '</tbody></table></div>';
   }
+
+  // ── RESULTADO DO CONCURSO: classificação + concorrentes ──
+  var ed = podeEditar();
+  html += '<div class="orc-folha-sec"><div class="orc-fsec-tit">Resultado do Concurso & Classificação</div>';
+  if(ed){
+    html += '<div class="orc-add-form" style="grid-template-columns:1fr;gap:8px">';
+    html += '<div class="orc-add-row" style="display:grid;grid-template-columns:1fr 120px;gap:8px">';
+    html += '<input id="orc-rc-base" type="number" step="0.01" placeholder="Valor base do concurso (€)" value="'+(p.valor_base_concurso||'')+'">';
+    html += '<button class="orc-btn sm" onclick="ORC.gravarBase()">Guardar base</button>';
+    html += '</div>';
+    html += '<div class="orc-add-row" style="display:grid;grid-template-columns:1.4fr 1fr 80px 80px;gap:6px">';
+    html += '<input id="orc-rc-entidade" list="orc-dl-rc-conc" placeholder="Entidade concorrente" autocomplete="off">';
+    html += '<input id="orc-rc-valor" type="number" step="0.01" placeholder="Valor (€)">';
+    html += '<input id="orc-rc-prazo" type="number" step="1" placeholder="Prazo">';
+    html += '<input id="orc-rc-pontuacao" type="number" step="0.01" placeholder="Pont.">';
+    html += '</div>';
+    html += '<datalist id="orc-dl-rc-conc"></datalist>';
+    html += '<div class="orc-add-row" style="display:grid;grid-template-columns:1fr 130px 100px;gap:6px;align-items:center">';
+    html += '<input id="orc-rc-obs" placeholder="Observações (ex: excluído)">';
+    html += '<select id="orc-rc-proprio"><option value="0">Concorrente</option><option value="1">A nossa proposta</option></select>';
+    html += '<button class="orc-btn sm" id="orc-rc-add" onclick="ORC.adicionarConcorrente()">+ Adicionar</button>';
+    html += '</div>';
+    html += '</div>';
+  }
+  html += '<div id="orc-resultado-lista"></div>';
+  html += '<div id="orc-resultado-resumo"></div>';
+  html += '</div>';
+
   cont.innerHTML = html;
+
+  // preencher datalist de concorrentes (das Definições) + "Sá Machado"
+  var dlRc = document.getElementById("orc-dl-rc-conc");
+  if(dlRc){
+    var nomesRc = (window.entListaActivos) ? window.entListaActivos("concorrentes") : [];
+    if(nomesRc.indexOf("Sá Machado")===-1) nomesRc.unshift("Sá Machado");
+    dlRc.innerHTML = nomesRc.map(function(n){ return '<option value="'+esc(n)+'">'; }).join("");
+  }
+  // renderizar a lista de resultados + resumo
+  renderResultado(p, ed);
 }
 function folhaCard(lbl, val, sub, cls){
   return '<div class="orc-kpi '+cls+'" style="margin:0"><div class="orc-kpi-lbl">'+lbl+'</div>'+
@@ -9331,6 +9686,12 @@ window.ORC = {
   restaurar: restaurarProposta,
   eliminarArq: eliminarDoArquivo,
   arqToggle: arqToggle,
+  arqSelAll: arqSelAll,
+  arqRestaurarSel: arqRestaurarSel,
+  arqEliminarSel: arqEliminarSel,
+  arqEliminarTodas: arqEliminarTodas,
+  aplicarPredefinicoes: aplicarPredefinicoes,
+  editarCelula: editarCelula,
   renderArquivo: renderArquivo,
   arqBusca: function(v){ _arqBusca = v||""; renderArquivo(); },
   _dados: function(){ return propostas; },  // para depuração
