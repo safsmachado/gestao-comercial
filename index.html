@@ -766,6 +766,7 @@ nav.nav, .nav{
       <button class="area-btn act" id="area-btn-obras" data-area="obras">🏗️ Carteira de Obras</button>
       <button class="area-btn" id="area-btn-orc" data-area="orcamentacao">📋 Orçamentação</button>
     </div>
+    <div id="hd-sync" style="display:none;font-family:'DM Mono',monospace;font-size:11px;padding:3px 8px;border-radius:5px"></div>
     <div style="font-family:'DM Mono',monospace;font-size:11px;color:var(--ac2);background:rgba(56,217,169,.12);padding:3px 8px;border-radius:5px" id="hd-versao">v36</div>
     <div class="user-menu" onclick="document.getElementById('user-dropdown').classList.toggle('open')" id="user-menu" style="display:none">
       <span class="badge-role" id="user-role">VIEWER</span>
@@ -1567,6 +1568,7 @@ async function fetchAllDataFromDB(){
       const v=typeof c.valor==='string'?JSON.parse(c.valor):c.valor;
       if(c.chave==='escaloes'&&v)localStorage.setItem('cob_escaloes',JSON.stringify(v));
       else if(c.chave==='custom_charts'&&v){_customCharts=v;localStorage.setItem('cob_custom_charts',JSON.stringify(v));}
+      else if(c.chave==='chart_prefs'&&v&&typeof _chartPrefs!=='undefined'){_chartPrefs=v;localStorage.setItem('cob_chart_prefs',JSON.stringify(v));}
     });
   }catch(e){}
   // Obras (não arquivadas)
@@ -1597,6 +1599,7 @@ async function fetchAllDataFromDB(){
     trabalhos_mais: parseFloat(o.trabalhos_mais || 0), trabalhos_mais_extra: parseFloat(o.trabalhos_mais_extra || 0), estado: o.estado,
     data_inicio: o.data_inicio, observacoes: o.observacoes,
     tipo_intervencao: o.tipo_intervencao, tipo_cliente: o.tipo_cliente, tipo_obra: o.tipo_obra,
+    ordem: (o.ordem !== null && o.ordem !== undefined) ? parseInt(o.ordem) : undefined,
     arquivadaEm: o.arquivada ? o.atualizado_em : undefined,
     execucoes: (execMap[o.id] || []).sort((a,b) => a.mes.localeCompare(b.mes))
   });
@@ -1605,6 +1608,8 @@ async function fetchAllDataFromDB(){
   obras = ordenarObras(obras);
   // Reavaliar estados das obras GII conforme a % de execução (em memória)
   if(typeof sincronizarEstados==="function")sincronizarEstados();
+  // Guardar fotografia do estado sincronizado (para salvar() detetar mudanças)
+  if(typeof _snapshotObras==="function")_snapshotObras();
   // Carregar propostas da Orçamentação
   try{
     const { data: propDB } = await sb.from('propostas').select('*').eq('arquivada', false).order('data_rececao', {ascending:false});
@@ -1654,7 +1659,7 @@ function switchTab(tab, btn){
 }
 
 // ── SINCRONIZAÇÃO COM SUPABASE ─────────────────────────────
-async function syncObraToDB(obra){
+async function syncObraToDB(obra, quiet){
   if(_syncing) return;
   const payload = {
     id: obra.id, codigo: obra.codigo || null, designacao: obra.designacao,
@@ -1666,12 +1671,15 @@ async function syncObraToDB(obra){
     data_inicio: obra.data_inicio || null, observacoes: obra.observacoes || null,
     tipo_intervencao: obra.tipo_intervencao || null, tipo_cliente: obra.tipo_cliente || null,
     tipo_obra: obra.tipo_obra || null,
+    ordem: (typeof obra.ordem === "number") ? obra.ordem : null,
     arquivada: !!obra.arquivadaEm,
     atualizado_por: _user ? _user.id : null
   };
+  if(window._syncStart) window._syncStart();
   const { error } = await sb.from('obras').upsert(payload, { onConflict: 'id' });
+  if(window._syncEnd) window._syncEnd(!!error);
   if(error){ showToast('Erro a guardar: ' + error.message, true); console.error(error); }
-  else { showToast('✓ Guardado'); }
+  else { if(!quiet) showToast('✓ Guardado'); }
   // Sincronizar execucoes
   if(obra.execucoes && obra.execucoes.length){
     const execPayload = obra.execucoes.map(e => ({
@@ -1742,14 +1750,42 @@ async function logHistorico(obraId, tipo, campo, antes, depois){
     user_id: _user.id
   });
 }
+window.logHistorico = logHistorico;
 
 // ── REALTIME (sincronizar entre utilizadores) ──────────────
+// ── Indicador de gravação + aviso ao sair com edição por gravar ──
+window._syncPending=0; window._syncErro=false;
+function _syncUI(){
+  var el=document.getElementById("hd-sync"); if(!el) return;
+  if(!window._user){ el.style.display="none"; return; }
+  el.style.display="";
+  if(window._syncErro){ el.textContent="⚠ erro ao guardar"; el.style.background="rgba(224,92,92,.15)"; el.style.color="#e05c5c"; return; }
+  if(window._syncPending>0){ el.textContent="⟳ a guardar…"; el.style.background="rgba(245,166,35,.15)"; el.style.color="#f5a623"; }
+  else { el.textContent="✓ guardado"; el.style.background="rgba(56,217,169,.12)"; el.style.color="#38d9a9"; }
+}
+function _syncStart(){ window._syncPending=(window._syncPending||0)+1; window._syncErro=false; _syncUI(); }
+function _syncEnd(erro){ window._syncPending=Math.max(0,(window._syncPending||1)-1); if(erro) window._syncErro=true; _syncUI(); }
+window._syncStart=_syncStart; window._syncEnd=_syncEnd; window._syncUI=_syncUI;
+window.addEventListener("beforeunload", function(e){
+  var m=document.getElementById("orc-modal");
+  var modalAberto = m && m.classList.contains("act");
+  if((window._syncPending||0)>0 || window._orcModalDirty || modalAberto){
+    e.preventDefault(); e.returnValue="";
+  }
+});
+
 function setupRealtime(){
   sb.channel('obras-changes')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'obras' }, (payload) => {
       // Quando outro user altera, recarregar
       if(_syncing) return;
       console.log('Realtime change detected, refreshing...');
+      refreshFromDB();
+    })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'propostas' }, (payload) => {
+      // Alterações às propostas por outro utilizador
+      if(_syncing) return;
+      console.log('Realtime change (propostas), refreshing...');
       refreshFromDB();
     })
     .subscribe();
@@ -1762,6 +1798,7 @@ async function refreshFromDB(){
     _syncing = true; window._syncing = true;
     try {
       await fetchAllDataFromDB();
+      if(window.carregarORC) await window.carregarORC();   // recarregar também propostas
       renderTab(); renderExec(); renderDash(); renderArquivadas();
       showToast('🔄 Dados actualizados');
     } finally { _syncing = false; window._syncing = false; }
@@ -1803,7 +1840,8 @@ function _userEstadoLer(email){
 }
 function _userEstadoGravar(email, activo){
   localStorage.setItem("gc_user_estado_"+email, activo?"1":"0");
-  // SUPABASE: await sb.from('perfis').update({activo}).eq('email', email);
+  // Persistir também na base de dados (coluna 'activo' em perfis); falha em silêncio se a coluna ainda não existir
+  try{ if(window.sb) sb.from('perfis').update({activo:activo}).eq('email', email).then(function(){}, function(){}); }catch(e){}
 }
 
 // renderiza a lista aplicando pesquisa + filtros (tudo no cliente)
@@ -1900,7 +1938,7 @@ async function renderAdminPanel(){
   _adminPerfis = (perfis || []).map(function(p){
     return Object.assign({}, p, {
       _paises: paisesPorUser[p.id] || [],
-      _activo: _userEstadoLer(p.email)   // true por defeito
+      _activo: (typeof p.activo==='boolean') ? p.activo : _userEstadoLer(p.email)   // BD se existir, senão localStorage
     });
   });
   filtrarUtilizadores();
@@ -2170,6 +2208,14 @@ function fazerBackup(){
     escaloes:JSON.parse(localStorage.getItem('cob_escaloes')||'null'),
     custom_charts:(typeof _customCharts!=='undefined')?_customCharts:[]
   };
+  // Incluir as propostas da Orçamentação (estavam a ficar de fora do backup)
+  try{
+    if(window.ORC && window.ORC.exportarDados){
+      var _orc = window.ORC.exportarDados();
+      dados.propostas = _orc.ativas || [];
+      dados.propostas_arquivadas = _orc.arquivadas || [];
+    }
+  }catch(e){ console.error('backup orc:', e); }
   const blob=new Blob([JSON.stringify(dados,null,2)],{type:'application/json'});
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a');
@@ -2183,7 +2229,7 @@ function fazerBackup(){
 async function restaurarBackup(input){
   const file=input.files&&input.files[0];
   if(!file)return;
-  if(!confirm('Restaurar este backup vai substituir TODOS os dados atuais (obras, definições, gráficos). Tens a certeza?')){input.value='';return;}
+  if(!confirm('Restaurar este backup vai substituir TODOS os dados atuais (obras, propostas, definições, gráficos). Tens a certeza?')){input.value='';return;}
   try{
     const texto=await file.text();
     const d=JSON.parse(texto);
@@ -2197,6 +2243,10 @@ async function restaurarBackup(input){
     if(d.tipos_cliente&&typeof TIPOS_CLIENTE!=='undefined')TIPOS_CLIENTE=d.tipos_cliente;
     if(d.escaloes)localStorage.setItem('cob_escaloes',JSON.stringify(d.escaloes));
     if(d.custom_charts&&typeof _customCharts!=='undefined'){_customCharts=d.custom_charts;localStorage.setItem('cob_custom_charts',JSON.stringify(d.custom_charts));}
+    // Restaurar propostas da Orçamentação (se existirem no backup)
+    if((d.propostas || d.propostas_arquivadas) && window.ORC && window.ORC.importarDados){
+      window.ORC.importarDados({ propostas: d.propostas||[], arquivadas: d.propostas_arquivadas||[] });
+    }
     // Gravar tudo (local + base de dados)
     salvar();salvarArc();salvarPaises();salvarLocs();salvarCambios();
     if(window.salvarTipos)salvarTipos();
@@ -2225,13 +2275,52 @@ function verificarLembreteBackup(){
 }
 
 // ── Persistência (localStorage + base de dados) ──────────
+// Fotografia do último estado sincronizado, por id de obra.
+// Permite a salvar() detetar automaticamente QUE obras mudaram,
+// em vez de depender de cada função marcar manualmente (_lastObraEdited).
+window._obrasSnapshot = window._obrasSnapshot || {};
+function _snapshotObras(){
+  window._obrasSnapshot = {};
+  (obras||[]).forEach(function(o){ try{ window._obrasSnapshot[o.id] = JSON.stringify(o); }catch(e){} });
+}
+// Regista no histórico as alterações de campos-chave de uma obra (compara com o estado anterior)
+var _HIST_CAMPOS_OBRA = {estado:"Estado", grupo:"Grupo", valor:"Valor", area:"Área", prazo:"Prazo", trabalhos_mais:"Trabalhos a mais", designacao:"Designação", data_inicio:"Início", dono:"Dono"};
+function _registarHistoricoObra(o, snapAntigo){
+  if(!window._user || typeof logHistorico!=="function") return;
+  if(!snapAntigo){ try{ logHistorico(o.id, "criação", null, null, o.designacao||o.codigo||""); }catch(e){} return; }
+  var ant; try{ ant = JSON.parse(snapAntigo); }catch(e){ return; }
+  Object.keys(_HIST_CAMPOS_OBRA).forEach(function(c){
+    var a = ant[c], d = o[c];
+    if((a==null?"":String(a)) !== (d==null?"":String(d))){
+      try{ logHistorico(o.id, "edição", _HIST_CAMPOS_OBRA[c], a, d); }catch(e){}
+    }
+  });
+}
 function salvar(){
   localStorage.setItem("cob_v7",JSON.stringify(obras));
   bumpVersao();
-  // Sync Supabase directamente (sem monkey-patch)
-  if(window._user && !window._syncing && window._lastObraEdited){
-    syncObraToDB(window._lastObraEdited).catch(e=>console.error('sync erro:',e));
+  // Sync Supabase: deteta automaticamente todas as obras que mudaram desde a última gravação
+  if(window._user && !window._syncing){
+    if(!window._obrasSnapshot) window._obrasSnapshot = {};
+    var mudadas = [];
+    (obras||[]).forEach(function(o){
+      var atual;
+      try{ atual = JSON.stringify(o); }catch(e){ return; }
+      if(window._obrasSnapshot[o.id] !== atual){
+        // registar alterações de campos-chave no histórico (tabela 'historico')
+        try{ _registarHistoricoObra(o, window._obrasSnapshot[o.id]); }catch(e){}
+        mudadas.push(o);
+        window._obrasSnapshot[o.id] = atual;
+      }
+    });
+    // compatibilidade: incluir obra marcada manualmente (ex.: arquivar) mesmo que não esteja na lista activa
+    if(window._lastObraEdited && mudadas.indexOf(window._lastObraEdited)===-1){
+      mudadas.push(window._lastObraEdited);
+      try{ window._obrasSnapshot[window._lastObraEdited.id] = JSON.stringify(window._lastObraEdited); }catch(e){}
+    }
     window._lastObraEdited = null;
+    var lote = mudadas.length > 1;   // em lote, gravar em silêncio (a função que chamou mostra o seu aviso)
+    mudadas.forEach(function(o){ syncObraToDB(o, lote).catch(function(e){console.error('sync erro:',e);}); });
   }
 }
 function salvarArc(){
@@ -2331,8 +2420,7 @@ function obraDrop(e, alvoId){
   // reatribuir ordem
   semOrigem.forEach(function(o, i){ o.ordem = i; });
   _obraDragId = null;
-  window._lastObraEdited = origem;
-  salvar();
+  salvar();   // grava localmente e sincroniza na BD todas as obras do grupo cuja ordem mudou
   renderTab();
   if(typeof showToast==="function") showToast("✓ Ordem actualizada");
 }
@@ -3090,7 +3178,7 @@ function renderCustomCharts(dash){
 window._defWidthMap={"ch-loc":4,"ch-exec":4,"ch-tipo-cli":4,"ch-an-prazoval":4,"ch-gi-obras":4};
 
 let _chartPrefs=JSON.parse(localStorage.getItem("cob_chart_prefs")||"{}");
-function _saveChartPrefs(){localStorage.setItem("cob_chart_prefs",JSON.stringify(_chartPrefs));}
+function _saveChartPrefs(){localStorage.setItem("cob_chart_prefs",JSON.stringify(_chartPrefs));if(window.syncConfigToDB)syncConfigToDB("chart_prefs",_chartPrefs);}
 
 function _chartId(cc){
   // id estável baseado no canvas dentro do card
@@ -4456,7 +4544,9 @@ function restaurarObra(id){
 function eliminarDefinitivo(id){
   if(!confirm("ELIMINAR DEFINITIVAMENTE? Esta acção é irreversível."))return;
   arquivadas=arquivadas.filter(x=>x.id!==id);
-  salvarArc();renderArquivadas();
+  salvarArc();
+  if(window.syncDeleteObraFromDB&&_user&&!_syncing)syncDeleteObraFromDB(id);
+  renderArquivadas();
 }
 // Selecção arquivo obras
 let _arcSel={};
@@ -5386,6 +5476,22 @@ async function exportPdfPanel(tabId){
 }
 
 // ────────────────────────────────────────────────────────────
+// PDF — INTELIGÊNCIA DE CONCURSOS
+// ────────────────────────────────────────────────────────────
+async function exportarInteligenciaPDF(){
+  var bloco=document.getElementById('orc-intel-bloco');
+  if(!bloco){ alert('Secção de Inteligência não encontrada.'); return; }
+  _expShow('A capturar Inteligência de Concursos...');
+  await new Promise(r=>setTimeout(r,150));
+  try{
+    var doc=await _pdfCaptura(bloco,'Inteligência de Concursos');
+    doc.save(_expFilename('Inteligencia_Concursos')+'.pdf');
+  }catch(e){ console.error('exportInteligenciaPDF',e); alert('Erro PDF: '+(e.message||e)); }
+  finally{ _expHide(); }
+}
+window.exportarInteligenciaPDF = exportarInteligenciaPDF;
+
+// ────────────────────────────────────────────────────────────
 // _pdfCaptura — screenshot do painel; muda de página apenas
 //   quando um bloco completo não cabe (não corta gráficos/grupos)
 // ────────────────────────────────────────────────────────────
@@ -6144,6 +6250,9 @@ function _wrapCreate(){
     </div>
   </div>
 
+  <!-- ALERTAS (prazos e habilitação) -->
+  <div id="orc-alertas" style="display:none"></div>
+
   <!-- KPIs -->
   <div class="orc-kpis" id="orc-kpis"></div>
 
@@ -6156,12 +6265,26 @@ function _wrapCreate(){
     <div class="orc-cc"><h3>Evolução de Propostas (últimos 12 meses)</h3><div class="orc-cw"><canvas id="orc-ch-evolucao"></canvas></div></div>
   </div>
 
+  <!-- 🎯 INTELIGÊNCIA DE CONCURSOS -->
+  <div id="orc-intel-bloco">
+  <div class="shd" style="margin-top:6px"><div><h2>🎯 Inteligência de Concursos</h2><p>Onde ganhamos, onde perdemos e a que distância — a partir do histórico de propostas</p></div><button class="orc-btn sec sm" onclick="exportarInteligenciaPDF()" title="Exportar esta secção para PDF (para apresentar à gerência)">📄 PDF</button></div>
+  <div class="orc-kpis" id="orc-intel-kpis"></div>
+  <div class="orc-charts">
+    <div class="orc-cc"><h3>Distribuição de Posições no Concurso</h3><div class="orc-cw"><canvas id="orc-ch-intel-pos"></canvas></div></div>
+    <div class="orc-cc"><h3>Resultado por Posição</h3><div class="orc-cw"><canvas id="orc-ch-intel-res"></canvas></div></div>
+  </div>
+  <div id="orc-intel-nota" style="font-size:12px;color:var(--tx2,#8892aa);margin:-4px 2px 14px"></div>
+  </div>
+
   <!-- Filtros -->
   <div class="orc-filtros">
     <input type="text" class="orc-search" id="orc-f-busca" placeholder="🔍 Pesquisar por código, designação ou cliente...">
     <select id="orc-f-estado"><option value="">Todos os estados</option></select>
     <select id="orc-f-pais"><option value="">Todos os países</option></select>
     <select id="orc-f-prio"><option value="">Todas as prioridades</option><option>Alta</option><option>Média</option><option>Baixa</option></select>
+    <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;white-space:nowrap"><input type="checkbox" id="orc-f-alertas"> ⚠ Só com alertas</label>
+    <button class="orc-btn sec sm" id="orc-f-resumo" onclick="ORC.copiarResumo()" title="Copiar para a área de transferência um resumo dos prazos para enviar à equipa">📋 Copiar resumo</button>
+    <button class="orc-btn sec sm" id="orc-f-email" onclick="ORC.enviarResumoEmail()" title="Abrir o email com o resumo já preenchido">✉ Email</button>
     <button class="orc-btn sec sm" id="orc-f-limpar">Limpar</button>
   </div>
 
@@ -6251,6 +6374,7 @@ function _wrapCreate(){
           <div class="orc-field"><label>Gestor Comercial</label><input id="orc-gestor" list="orc-dl-gestores" autocomplete="off"><datalist id="orc-dl-gestores"></datalist></div>
           <div class="orc-field"><label>Responsável Orçamento</label><input id="orc-responsavel" list="orc-dl-responsaveis" autocomplete="off"><datalist id="orc-dl-responsaveis"></datalist></div>
           <div class="orc-field"><label>Estado Comercial</label><select id="orc-estado"></select></div>
+          <div class="orc-field"><label>Motivo de Perda <span style="color:var(--tx3,#8892aa)">(se Não Adjudicado)</span></label><select id="orc-motivo_perda"><option value="">—</option><option>Preço</option><option>Habilitação</option><option>Prazo</option><option>Exclusão</option><option>Decisão do Dono</option><option>Proposta em branco</option><option>Outro</option></select></div>
           <div class="orc-field"><label>Prioridade</label><select id="orc-prioridade"><option>Média</option><option>Alta</option><option>Baixa</option></select></div>
         </div>
       </div>
@@ -6274,6 +6398,7 @@ function _wrapCreate(){
           <div class="orc-field"><label>Valor Estimado (€)</label><input type="number" step="0.01" id="orc-valor_estimado"></div>
           <div class="orc-field"><label>Valor da Proposta (€)</label><input type="number" step="0.01" id="orc-valor_proposta"></div>
           <div class="orc-field"><label>Valor Revisto (€)</label><input type="number" step="0.01" id="orc-valor_revisto"></div>
+          <div class="orc-field"><label>Valor do Vencedor (€)</label><input type="number" step="0.01" id="orc-valor_vencedor" placeholder="Valor adjudicado ao vencedor" oninput="ORC.calcDistVencedor()"><div id="orc-dist-vencedor" style="font-size:11px;margin-top:3px"></div></div>
           <div class="orc-field"><label>Margem Prevista (%)</label><input type="number" step="0.1" id="orc-margem"></div>
           <div class="orc-field"><label>Probabilidade de Adjudicação (%)</label><input type="number" step="1" min="0" max="100" id="orc-probabilidade"></div>
           <div class="orc-field"><label>Prazo de Execução (meses)</label><input type="number" step="1" id="orc-prazo"></div>
@@ -6356,6 +6481,12 @@ function _wrapCreate(){
               <button class="orc-btn sm" id="orc-rev-add">+ Registar revisão</button>
             </div>
             <div id="orc-rev-lista"></div>
+          </div>
+
+          <!-- HABILITAÇÃO -->
+          <div class="orc-side-box">
+            <h3>✅ Habilitação (documentos do concurso)</h3>
+            <div id="orc-hab-lista"></div>
           </div>
 
           <!-- DOCUMENTOS -->
@@ -6520,9 +6651,21 @@ async function carregar(){
   if(!Array.isArray(arquivadas)) arquivadas = [];
   // Só injectar dados de teste se não houver nada E sem utilizador autenticado
   if(propostas.length === 0 && !window._user){ _injectarDadosTeste(); }
+  // Fotografia do estado sincronizado (para salvar() detetar automaticamente o que muda)
+  _orcSnapshotTirar();
   // Actualizar UI se já inicializada
   if(typeof render === 'function') render();
   if(typeof renderArquivo === 'function') renderArquivo();
+}
+
+// Fotografia do último estado sincronizado, por id de proposta.
+// Permite a salvar() detetar sozinha QUE propostas mudaram, sem depender
+// de cada função marcar manualmente (window._lastPropostaEdited).
+var _orcSnapshot = {};
+function _orcSnapshotTirar(){
+  _orcSnapshot = {};
+  (propostas||[]).forEach(function(p){ try{ _orcSnapshot[p.id]=JSON.stringify(p); }catch(e){} });
+  (arquivadas||[]).forEach(function(p){ try{ _orcSnapshot[p.id]=JSON.stringify(p); }catch(e){} });
 }
 
 function _injectarDadosTeste(){
@@ -6769,14 +6912,40 @@ function aplicarPredefinicoes(){
   }
 }
 function salvar(){
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(propostas));
-  if(window._lastPropostaEdited && window._user && window.sb){
-    syncPropostaToDB(window._lastPropostaEdited).catch(function(e){console.error('orc sync:',e);});
-    window._lastPropostaEdited = null;
+  // 1) localStorage — sempre, à prova de falha
+  try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(propostas)); }catch(e){ console.error('orc local save:',e); }
+  // 2) Base de dados — detetar automaticamente TODAS as propostas que mudaram
+  //    (não depende de cada função marcar window._lastPropostaEdited)
+  if(!(window._user && window.sb)){ window._lastPropostaEdited=null; return; }
+  if(!_orcSnapshot) _orcSnapshot={};
+  var mudadas=[];
+  (propostas||[]).forEach(function(p){
+    var atual; try{ atual=JSON.stringify(p); }catch(e){ return; }
+    if(_orcSnapshot[p.id]!==atual){ try{ _registarHistoricoProposta(p, _orcSnapshot[p.id]); }catch(e){} mudadas.push(p); _orcSnapshot[p.id]=atual; }
+  });
+  // compatibilidade: incluir proposta marcada manualmente (ex.: arquivar, que a remove da lista)
+  if(window._lastPropostaEdited && mudadas.indexOf(window._lastPropostaEdited)===-1){
+    mudadas.push(window._lastPropostaEdited);
+    try{ _orcSnapshot[window._lastPropostaEdited.id]=JSON.stringify(window._lastPropostaEdited); }catch(e){}
   }
+  window._lastPropostaEdited=null;
+  mudadas.forEach(function(p){ syncPropostaToDB(p).catch(function(e){console.error('orc sync:',e);}); });
 }
 
 // ── Helpers ──────────────────────────────────────────────────
+// Regista no histórico (tabela 'historico') as alterações de campos-chave de uma proposta
+var _HIST_CAMPOS_PROP = {estado:"Estado", valor_proposta:"Valor proposta", valor_revisto:"Valor revisto", motivo_perda:"Motivo de perda", classificacao:"Classificação", concorrente:"Concorrente", valor_vencedor:"Valor do vencedor"};
+function _registarHistoricoProposta(p, snapAntigo){
+  if(!window._user || typeof window.logHistorico!=="function") return;
+  if(!snapAntigo){ try{ window.logHistorico(p.id, "criação proposta", null, null, p.designacao||p.codigo||""); }catch(e){} return; }
+  var ant; try{ ant=JSON.parse(snapAntigo); }catch(e){ return; }
+  Object.keys(_HIST_CAMPOS_PROP).forEach(function(c){
+    var a=ant[c], d=p[c];
+    if((a==null?"":String(a))!==(d==null?"":String(d))){
+      try{ window.logHistorico(p.id, "edição proposta", _HIST_CAMPOS_PROP[c], a, d); }catch(e){}
+    }
+  });
+}
 function _toast(msg, err){ if(window.showToast) window.showToast(msg, err); }
 function fmtEUR(v){
   v = parseFloat(v)||0;
@@ -6893,16 +7062,32 @@ function abrirModal(id){
     document.getElementById("orc-concorrente").value = "Sá Machado";
     preencherLocalidades("", "");
   }
+  if(typeof calcDistVencedor==="function") calcDistVencedor();
+  window._orcModalDirty=false;
   document.getElementById("orc-modal").classList.add("act");
 }
-function fecharModal(){ document.getElementById("orc-modal").classList.remove("act"); }
+function fecharModal(){ window._orcModalDirty=false; document.getElementById("orc-modal").classList.remove("act"); }
+
+// Distância de preço para o vencedor (mostrada por baixo do campo no formulário)
+function calcDistVencedor(){
+  var el=document.getElementById("orc-dist-vencedor"); if(!el) return;
+  var gv=function(id){ var e=document.getElementById(id); return e?parseFloat(e.value)||0:0; };
+  var vv=gv("orc-valor_vencedor");
+  var np=gv("orc-valor_revisto")||gv("orc-valor_proposta");
+  if(vv>0 && np>0){
+    var d=(np-vv)/vv*100;
+    if(Math.abs(d)<0.05){ el.textContent="Igual ao vencedor"; el.style.color="#38d9a9"; }
+    else if(d>0){ el.textContent="Ficámos "+d.toFixed(1)+"% ACIMA do vencedor"; el.style.color = d>5?"#e05c5c":"#f5a623"; }
+    else { el.textContent="Ficámos "+Math.abs(d).toFixed(1)+"% ABAIXO do vencedor"; el.style.color="#38d9a9"; }
+  } else { el.textContent=""; }
+}
 
 function camposForm(){
   return ["codigo","designacao","pais","localidade","cliente","tipo_cliente",
     "tipo_obra","tipo_intervencao","dono","concorrente","gestor","responsavel",
     "estado","prioridade","data_rececao","data_limite","data_entrega",
     "data_revisao","data_decisao","data_adjudicacao","valor_base_concurso",
-    "valor_estimado","valor_proposta","valor_revisto","margem","probabilidade","prazo",
+    "valor_estimado","valor_proposta","valor_revisto","valor_vencedor","motivo_perda","margem","probabilidade","prazo",
     "num_revisoes","revisao_atual","ultimo_contacto","observacoes",
     "estrategia","pormenores","notas"];
 }
@@ -6938,6 +7123,15 @@ function guardar(){
   }
 
   obj.ultima_alteracao = new Date().toISOString();
+
+  // Motivo de perda obrigatório quando a proposta é Não Adjudicada
+  if(obj.estado==="Não Adjudicado" && !(obj.motivo_perda||"").trim()){
+    _toast("Indica o motivo de perda (proposta Não Adjudicada).", true);
+    var mp=document.getElementById("orc-motivo_perda"); if(mp){ mp.focus(); }
+    return;
+  }
+  // Se deixou de ser perdida, limpar o motivo
+  if(obj.estado!=="Não Adjudicado") obj.motivo_perda = "";
 
   if(existente){
     var i = propostas.findIndex(function(x){return x.id===id;});
@@ -6984,6 +7178,7 @@ function _toDB(p){
     estado: p.estado||null, prioridade: p.prioridade||null,
     valor_estimado: p.valor_estimado||0, valor_proposta: p.valor_proposta||0,
     valor_revisto: p.valor_revisto||null, margem: p.margem||null,
+    valor_vencedor: p.valor_vencedor||null, motivo_perda: p.motivo_perda||null,
     probabilidade: p.probabilidade||null, prazo: p.prazo||null,
     data_rececao: p.data_rececao||null, data_limite: p.data_limite||null,
     data_entrega: p.data_entrega||null, data_decisao: p.data_decisao||null,
@@ -7002,19 +7197,31 @@ function _fromDB(r){
     estado:r.estado, prioridade:r.prioridade,
     valor_estimado:r.valor_estimado||0, valor_proposta:r.valor_proposta||0,
     valor_revisto:r.valor_revisto, margem:r.margem, probabilidade:r.probabilidade,
+    valor_vencedor:r.valor_vencedor, motivo_perda:r.motivo_perda,
     prazo:r.prazo, data_rececao:r.data_rececao, data_limite:r.data_limite,
     data_entrega:r.data_entrega, data_decisao:r.data_decisao,
     observacoes:r.observacoes,
     timeline:r.timeline||[], revisoes:r.revisoes||[], documentos:r.documentos||[],
+    habilitacao: r.habilitacao||[],
     obra_id:r.obra_id, obra_codigo:r.obra_codigo,
     arquivadaEm: r.arquivada_em||null
   };
 }
 async function syncPropostaToDB(p){
   if(!window._user || !window.sb) return;
-  var payload = _toDB(p);
+  var payload = _toDB(p);  // inclui campos opcionais (habilitacao, motivo_perda, valor_vencedor)
+  if(window._syncStart) window._syncStart();
   var res = await window.sb.from('propostas').upsert(payload, {onConflict:'id'});
-  if(res.error){ console.error('propostas sync error:', res.error); }
+  if(res.error){
+    // Provavelmente faltam colunas opcionais novas na BD — tentar sem elas para NUNCA perder a gravação
+    var OPCIONAIS = ["habilitacao","motivo_perda","valor_vencedor"];
+    var basico = {}; Object.keys(payload).forEach(function(k){ if(OPCIONAIS.indexOf(k)===-1) basico[k]=payload[k]; });
+    var res2 = await window.sb.from('propostas').upsert(basico, {onConflict:'id'});
+    if(window._syncEnd) window._syncEnd(!!res2.error);
+    if(res2.error) console.error('propostas sync error:', res2.error);
+  } else {
+    if(window._syncEnd) window._syncEnd(false);
+  }
 }
 async function deletePropostaFromDB(id){
   if(!window._user || !window.sb) return;
@@ -7175,6 +7382,9 @@ function eliminarDoArquivo(id){
   if(idsSel.length > 0){
     if(!confirm('Eliminar DEFINITIVAMENTE '+idsSel.length+' proposta(s) seleccionada(s)?\nEsta acção NÃO pode ser anulada e perde todo o histórico.')) return;
     arquivadas = arquivadas.filter(function(x){return !_arqSel[x.id];});
+    if(window._user && window.sb && window.deletePropostaFromDB){
+      idsSel.forEach(function(i){ deletePropostaFromDB(i).catch(function(e){console.error(e);}); });
+    }
     _arqSel = {};
     salvarArquivo();
     if(typeof renderArquivo==="function") renderArquivo();
@@ -7187,6 +7397,9 @@ function eliminarDoArquivo(id){
   if(!p) return;
   if(!confirm('Eliminar DEFINITIVAMENTE "'+(p.designacao||p.codigo)+'"?\nEsta acção NÃO pode ser anulada e perde todo o histórico.')) return;
   arquivadas = arquivadas.filter(function(x){return x.id!==id;});
+  if(window._user && window.sb && window.deletePropostaFromDB){
+    deletePropostaFromDB(id).catch(function(e){console.error(e);});
+  }
   salvarArquivo();
   if(typeof renderArquivo==="function") renderArquivo();
   _toast("Proposta eliminada definitivamente");
@@ -7195,6 +7408,17 @@ function eliminarDoArquivo(id){
 // ══════════════════════════════════════════════════════════════
 //  RENDER — KPIs, gráficos e tabela
 // ══════════════════════════════════════════════════════════════
+// Uma proposta "tem alerta" se está aberta e em atraso/urgente, ou perto do prazo com habilitação incompleta
+function _temAlerta(p){
+  if(ESTADOS_FECHADOS.indexOf(p.estado)!==-1) return false;
+  var pr=calcPrazo(p);
+  if(pr.tipo==="atraso"||pr.tipo==="urgente") return true;
+  if(Array.isArray(p.habilitacao)&&p.habilitacao.length){
+    var falta=p.habilitacao.filter(function(h){return !h.feito;}).length;
+    if(falta>0 && pr.dias!==null && pr.dias<=10) return true;
+  }
+  return false;
+}
 function listaFiltrada(){
   var arr = propostas.slice();
   if(filtros.busca){
@@ -7202,12 +7426,14 @@ function listaFiltrada(){
     arr = arr.filter(function(p){
       return (p.codigo||"").toLowerCase().indexOf(q)!==-1 ||
              (p.designacao||"").toLowerCase().indexOf(q)!==-1 ||
-             (p.cliente||"").toLowerCase().indexOf(q)!==-1;
+             (p.cliente||"").toLowerCase().indexOf(q)!==-1 ||
+             (p.dono||"").toLowerCase().indexOf(q)!==-1;
     });
   }
   if(filtros.estado) arr = arr.filter(function(p){return p.estado===filtros.estado;});
   if(filtros.pais)   arr = arr.filter(function(p){return p.pais===filtros.pais;});
   if(filtros.prio)   arr = arr.filter(function(p){return (p.prioridade||"Média")===filtros.prio;});
+  if(filtros.soAlertas) arr = arr.filter(_temAlerta);
 
   var c = ordenacao.campo, d = ordenacao.dir;
   arr.sort(function(a,b){
@@ -7603,6 +7829,7 @@ function renderArquivo(){
       return (p.codigo||"").toLowerCase().indexOf(q)!==-1 ||
              (p.designacao||"").toLowerCase().indexOf(q)!==-1 ||
              (p.cliente||"").toLowerCase().indexOf(q)!==-1 ||
+             (p.dono||"").toLowerCase().indexOf(q)!==-1 ||
              (p.concorrente||"").toLowerCase().indexOf(q)!==-1;
     });
   }
@@ -7704,8 +7931,10 @@ function render(){
     getPaises().forEach(function(p){ var o=document.createElement("option"); o.textContent=p; fPais.appendChild(o); });
     fPais.value = atual;
   }
+  renderAlertas();
   renderKPIs();
   renderCharts();
+  renderInteligencia();
   renderTabela();
 }
 
@@ -7719,6 +7948,8 @@ function ligarEventos(){
   document.getElementById("orc-modal-x").addEventListener("click", fecharModal);
   document.getElementById("orc-modal-cancel").addEventListener("click", fecharModal);
   document.getElementById("orc-modal-save").addEventListener("click", guardar);
+  // marcar como "por gravar" quando o utilizador altera o formulário
+  document.getElementById("orc-modal").addEventListener("input", function(){ window._orcModalDirty=true; });
   // fechar modal ao clicar no fundo
   document.getElementById("orc-modal").addEventListener("click", function(e){
     if(e.target===this) fecharModal();
@@ -7730,12 +7961,15 @@ function ligarEventos(){
   document.getElementById("orc-f-estado").addEventListener("change", function(){ filtros.estado=this.value; renderTabela(); });
   document.getElementById("orc-f-pais").addEventListener("change", function(){ filtros.pais=this.value; renderTabela(); });
   document.getElementById("orc-f-prio").addEventListener("change", function(){ filtros.prio=this.value; renderTabela(); });
+  var fAl=document.getElementById("orc-f-alertas");
+  if(fAl) fAl.addEventListener("change", function(){ filtros.soAlertas=this.checked; renderTabela(); });
   document.getElementById("orc-f-limpar").addEventListener("click", function(){
-    filtros={busca:"",estado:"",pais:"",prio:""};
+    filtros={busca:"",estado:"",pais:"",prio:"",soAlertas:false};
     document.getElementById("orc-f-busca").value="";
     document.getElementById("orc-f-estado").value="";
     document.getElementById("orc-f-pais").value="";
     document.getElementById("orc-f-prio").value="";
+    var fa=document.getElementById("orc-f-alertas"); if(fa) fa.checked=false;
     renderTabela();
   });
 
@@ -7863,6 +8097,7 @@ function renderDetalhe(){
   dados += linhaDado("Resp. Orçamento", esc(p.responsavel||"—"));
   dados += linhaDado("Prioridade", esc(p.prioridade||"Média"));
   dados += linhaDado("Prazo", '<span class="orc-prazo orc-prazo-'+pr.tipo+'">'+pr.txt+'</span>');
+  if(p.estado==="Não Adjudicado" && (p.motivo_perda||"").trim()) dados += linhaDado("Motivo de Perda", '<span style="color:#e05c5c">'+esc(p.motivo_perda)+'</span>');
   dados += '</div></div>';
 
   dados += '<div class="orc-det-sec"><div class="orc-fsec-tit">Datas</div><div class="orc-dd-grid">';
@@ -7878,6 +8113,16 @@ function renderDetalhe(){
   dados += linhaDado("Valor Estimado", p.valor_estimado?fmtEUR(p.valor_estimado):"—");
   dados += linhaDado("Valor da Proposta", p.valor_proposta?fmtEUR(p.valor_proposta):"—");
   dados += linhaDado("Valor Revisto", p.valor_revisto?fmtEUR(p.valor_revisto):"—");
+  if(p.valor_vencedor){
+    dados += linhaDado("Valor do Vencedor", fmtEUR(p.valor_vencedor));
+    var _nosso=parseFloat(p.valor_revisto||p.valor_proposta)||0, _venc=parseFloat(p.valor_vencedor)||0;
+    if(_nosso>0 && _venc>0){
+      var _dd=(_nosso-_venc)/_venc*100;
+      var _cor = Math.abs(_dd)<0.05?"#38d9a9":(_dd>0?(_dd>5?"#e05c5c":"#f5a623"):"#38d9a9");
+      var _txt = Math.abs(_dd)<0.05?"igual ao vencedor":((_dd>0?"+":"")+_dd.toFixed(1)+"% "+(_dd>0?"acima":"abaixo"));
+      dados += linhaDado("Distância ao Vencedor", '<span style="color:'+_cor+'">'+_txt+'</span>');
+    }
+  }
   dados += linhaDado("Margem Prevista", (p.margem!=null&&p.margem!=="")?(p.margem+"%"):"—");
   dados += linhaDado("Prob. Adjudicação", (p.probabilidade!=null&&p.probabilidade!=="")?(p.probabilidade+"%"):"—");
   dados += linhaDado("Prazo Execução", p.prazo?(p.prazo+" meses"):"—");
@@ -7902,6 +8147,8 @@ function renderDetalhe(){
   renderTimeline(p, editavel);
   // ── REVISÕES ──
   renderRevisoes(p, editavel);
+  // ── HABILITAÇÃO ──
+  renderHabilitacao(p, editavel);
 }
 
 // ── Timeline ──────────────────────────────────────────────────
@@ -9645,6 +9892,260 @@ function removerConcorrente(rcId){
   renderTabela();
 }
 // API pública
+// ══════════════════════════════════════════════════════════════
+//  HABILITAÇÃO (checklist de documentos do concurso)
+// ══════════════════════════════════════════════════════════════
+function _habDefault(){
+  var itens=["Certidão Permanente / Registo Comercial",
+    "Declaração de não dívida — Autoridade Tributária",
+    "Declaração de não dívida — Segurança Social",
+    "Alvará / Certificado IMPIC (classe e categorias)",
+    "Registo Criminal dos titulares",
+    "Declaração Anexo I (art.º 57.º CCP)",
+    "Documento Europeu Único (DUE/ESPD)",
+    "Comprovativo de capacidade técnica e financeira",
+    "Seguros / Caução (se exigido)"];
+  return itens.map(function(t){ return {id:"h_"+Math.random().toString(36).slice(2,8), item:t, feito:false}; });
+}
+function _habProp(pid){
+  var p=propostas.find(function(x){return x.id===pid;});
+  if(!p && typeof arquivadas!=="undefined" && arquivadas) p=arquivadas.find(function(x){return x.id===pid;});
+  return p;
+}
+function renderHabilitacao(p, editavel){
+  var el=document.getElementById("orc-hab-lista"); if(!el||!p) return;
+  if(!Array.isArray(p.habilitacao)||!p.habilitacao.length) p.habilitacao=_habDefault();
+  var total=p.habilitacao.length;
+  var feitos=p.habilitacao.filter(function(h){return h.feito;}).length;
+  var pct=total?Math.round(feitos/total*100):0;
+  var corBarra = pct===100?"#38d9a9":(pct>=50?"#f5a623":"#e05c5c");
+  var pr=(typeof calcPrazo==="function")?calcPrazo(p):{tipo:"neutro",txt:"—",dias:null};
+  var corPrazo = pr.tipo==="atraso"?"#e05c5c":(pr.tipo==="urgente"?"#f5a623":(pr.tipo==="ok"?"#38d9a9":"#8892aa"));
+  var prazoTxt = p.data_limite ? ("Limite: "+esc(p.data_limite)+" · "+esc(pr.txt)) : "Sem data limite definida";
+  var html="";
+  html+='<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;margin-bottom:6px">'+
+        '<span style="color:'+corPrazo+'">🕑 '+prazoTxt+'</span>'+
+        '<span style="color:#8892aa">'+feitos+'/'+total+' ('+pct+'%)</span></div>';
+  html+='<div style="height:6px;background:rgba(42,48,69,.6);border-radius:4px;overflow:hidden;margin-bottom:10px">'+
+        '<div style="height:100%;width:'+pct+'%;background:'+corBarra+';transition:width .2s"></div></div>';
+  p.habilitacao.forEach(function(h){
+    html+='<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px">'+
+      '<input type="checkbox" '+(h.feito?'checked':'')+' '+(editavel?'':'disabled')+' onclick="ORC.habToggle(\''+p.id+'\',\''+h.id+'\')">'+
+      '<span style="flex:1'+(h.feito?';text-decoration:line-through;color:#8892aa':'')+'">'+esc(h.item)+'</span>'+
+      (editavel?'<button class="orc-btn sec sm" style="padding:2px 7px" title="Remover" onclick="ORC.habRemove(\''+p.id+'\',\''+h.id+'\')">×</button>':'')+
+      '</div>';
+  });
+  if(editavel){
+    html+='<div style="display:flex;gap:6px;margin-top:8px">'+
+      '<input id="orc-hab-novo" placeholder="Adicionar documento..." style="flex:1" onkeydown="if(event.key===\'Enter\')ORC.habAdd(\''+p.id+'\')">'+
+      '<button class="orc-btn sm" onclick="ORC.habAdd(\''+p.id+'\')">+ Adicionar</button></div>';
+  }
+  el.innerHTML=html;
+}
+function habToggle(pid,hid){
+  if(!podeEditar())return;
+  var p=_habProp(pid); if(!p)return;
+  if(!Array.isArray(p.habilitacao))p.habilitacao=_habDefault();
+  var it=p.habilitacao.find(function(x){return x.id===hid;});
+  if(it)it.feito=!it.feito;
+  window._lastPropostaEdited=p; salvar();
+  renderHabilitacao(p,podeEditar());
+  if(typeof renderAlertas==="function")renderAlertas();
+}
+function habAdd(pid){
+  if(!podeEditar())return;
+  var inp=document.getElementById("orc-hab-novo"); if(!inp)return;
+  var v=(inp.value||"").trim(); if(!v)return;
+  var p=_habProp(pid); if(!p)return;
+  if(!Array.isArray(p.habilitacao))p.habilitacao=_habDefault();
+  p.habilitacao.push({id:"h_"+Math.random().toString(36).slice(2,8),item:v,feito:false});
+  window._lastPropostaEdited=p; salvar();
+  renderHabilitacao(p,podeEditar());
+}
+function habRemove(pid,hid){
+  if(!podeEditar())return;
+  var p=_habProp(pid); if(!p)return;
+  p.habilitacao=(p.habilitacao||[]).filter(function(x){return x.id!==hid;});
+  window._lastPropostaEdited=p; salvar();
+  renderHabilitacao(p,podeEditar());
+}
+
+// ══════════════════════════════════════════════════════════════
+//  ALERTAS (prazos a expirar + habilitação em falta)
+// ══════════════════════════════════════════════════════════════
+function renderAlertas(){
+  var el=document.getElementById("orc-alertas"); if(!el)return;
+  var abertas=propostas.filter(function(p){return ESTADOS_FECHADOS.indexOf(p.estado)===-1;});
+  var linhas=[];
+  abertas.forEach(function(p){
+    var pr=calcPrazo(p);
+    var falta=(Array.isArray(p.habilitacao)?p.habilitacao.filter(function(h){return !h.feito;}).length:0);
+    var habAlerta = falta>0 && pr.dias!==null && pr.dias<=10;
+    if(pr.tipo!=="atraso" && pr.tipo!=="urgente" && !habAlerta) return;
+    var cor = pr.tipo==="atraso" ? "#e05c5c" : (pr.tipo==="urgente" ? "#f5a623" : "#4f8ef7");
+    var partes=[];
+    if(pr.tipo==="atraso"||pr.tipo==="urgente") partes.push(pr.txt);
+    if(habAlerta) partes.push("falta habilitação ("+falta+")");
+    var prioridade = pr.tipo==="atraso"?0:(pr.tipo==="urgente"?1:2);
+    linhas.push({p:p,cor:cor,txt:partes.join(" · "),ord:prioridade,dias:(pr.dias===null?9999:pr.dias)});
+  });
+  if(!linhas.length){ el.style.display="none"; el.innerHTML=""; return; }
+  linhas.sort(function(a,b){ return a.ord-b.ord || a.dias-b.dias; });
+  var html='<div style="border:1px solid rgba(42,48,69,.8);border-radius:8px;padding:10px 12px;margin-bottom:14px;background:rgba(224,92,92,.04)">'+
+    '<div style="font-size:12px;font-weight:600;color:#8892aa;margin-bottom:8px">⚠ ALERTAS — '+linhas.length+' proposta'+(linhas.length===1?'':'s')+' a precisar de atenção</div>';
+  linhas.forEach(function(l){
+    html+='<div onclick="ORC.detalhe(\''+l.p.id+'\')" style="cursor:pointer;display:flex;justify-content:space-between;gap:10px;align-items:center;padding:7px 10px;border-left:3px solid '+l.cor+';background:rgba(255,255,255,.03);border-radius:4px;margin-bottom:4px;font-size:13px">'+
+      '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(l.p.codigo?(l.p.codigo+" · "):"")+esc(l.p.designacao||"(sem nome)")+'</span>'+
+      '<span style="color:'+l.cor+';white-space:nowrap;font-weight:600">'+esc(l.txt)+'</span></div>';
+  });
+  html+='</div>';
+  el.innerHTML=html; el.style.display="";
+}
+
+// ══════════════════════════════════════════════════════════════
+//  INTELIGÊNCIA DE CONCURSOS
+// ══════════════════════════════════════════════════════════════
+function renderInteligencia(){
+  var todas = propostas.concat((typeof arquivadas!=="undefined"&&arquivadas)?arquivadas:[]);
+  var decididas = todas.filter(function(p){return p.estado==="Adjudicado"||p.estado==="Não Adjudicado";});
+  var adj = decididas.filter(function(p){return p.estado==="Adjudicado";});
+  var taxa = decididas.length?Math.round(adj.length/decididas.length*100):0;
+  function pos(p){ var n=parseInt(p.classificacao); return (n>0)?n:0; }
+  var comPos = decididas.filter(function(p){return pos(p)>0;});
+  var posMedia = comPos.length ? (comPos.reduce(function(s,p){return s+pos(p);},0)/comPos.length) : null;
+  var primNaoAdj = decididas.filter(function(p){return pos(p)===1 && p.estado==="Não Adjudicado";}).length;
+  var valAdjArr = adj.map(function(p){return parseFloat(p.valor_proposta)||0;}).filter(function(v){return v>0;});
+  var valAdjMed = valAdjArr.length ? valAdjArr.reduce(function(s,v){return s+v;},0)/valAdjArr.length : 0;
+  // distância média ao vencedor (nas perdidas com valor do vencedor preenchido)
+  var distArr = todas.filter(function(p){
+    var nosso=parseFloat(p.valor_revisto||p.valor_proposta)||0;
+    return p.estado==="Não Adjudicado" && (parseFloat(p.valor_vencedor)||0)>0 && nosso>0;
+  }).map(function(p){
+    var nosso=parseFloat(p.valor_revisto||p.valor_proposta)||0, venc=parseFloat(p.valor_vencedor)||0;
+    return (nosso-venc)/venc*100;
+  });
+  var distMed = distArr.length ? distArr.reduce(function(s,v){return s+v;},0)/distArr.length : null;
+  // motivos de perda
+  var motivos={}; todas.forEach(function(p){ if(p.estado==="Não Adjudicado" && (p.motivo_perda||"").trim()){ var m=p.motivo_perda.trim(); motivos[m]=(motivos[m]||0)+1; } });
+
+  var kpis=[
+    {cls:"ac2",lbl:"Taxa de Adjudicação",val:taxa+"%",sub:adj.length+" de "+decididas.length+" decididas"},
+    {cls:"ac",lbl:"Posição Média",val:posMedia?posMedia.toFixed(1)+"º":"—",sub:comPos.length+" com classificação"},
+    {cls:"wa",lbl:"1º mas não adjudicada",val:primNaoAdj,sub:"melhor posição, sem ganhar"},
+    {cls:(distMed!=null&&distMed>0?"dg":"ac2"),lbl:"Distância ao Vencedor",val:(distMed!=null?((distMed>0?"+":"")+distMed.toFixed(1)+"%"):"—"),sub:distArr.length?("média em "+distArr.length+" perdidas"):"falta valor do vencedor"},
+    {cls:"ac2",lbl:"Valor Médio Adjudicado",val:valAdjMed?fmtEUR(valAdjMed):"—",sub:""}
+  ];
+  var kEl=document.getElementById("orc-intel-kpis");
+  if(kEl) kEl.innerHTML=kpis.map(function(k){
+    return '<div class="orc-kpi '+k.cls+'"><div class="orc-kpi-lbl">'+k.lbl+'</div><div class="orc-kpi-val">'+k.val+'</div>'+(k.sub?'<div class="orc-kpi-sub">'+k.sub+'</div>':'')+'</div>';
+  }).join("");
+
+  if(typeof Chart!=="undefined"){
+    var t=temaChart();
+    var buckets={"1º":0,"2º":0,"3º":0,"4º":0,"5º":0,"6º+":0};
+    todas.forEach(function(p){ var n=pos(p); if(n<=0)return; var k=n>=6?"6º+":(n+"º"); buckets[k]=(buckets[k]||0)+1; });
+    var posLabels=Object.keys(buckets), posData=posLabels.map(function(k){return buckets[k];});
+    var pe=document.getElementById("orc-ch-intel-pos");
+    if(pe){
+      charts.intelPos=new Chart(pe,{type:"bar",
+        data:{labels:posLabels,datasets:[{data:posData,backgroundColor:t.paleta[0],borderRadius:5}]},
+        options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+          scales:{x:{ticks:{color:t.txt,font:{size:11}},grid:{display:false}},
+                  y:{ticks:{color:t.txt,precision:0},grid:{color:t.grid},beginAtZero:true}}}});
+    }
+    function cont(n,estado){ return decididas.filter(function(p){return pos(p)===n && p.estado===estado;}).length; }
+    var re=document.getElementById("orc-ch-intel-res");
+    if(re){
+      charts.intelRes=new Chart(re,{type:"bar",
+        data:{labels:["1º","2º","3º"],datasets:[
+          {label:"Adjudicada",data:[1,2,3].map(function(n){return cont(n,"Adjudicado");}),backgroundColor:"rgba(56,217,169,.8)",borderRadius:4},
+          {label:"Não adjudicada",data:[1,2,3].map(function(n){return cont(n,"Não Adjudicado");}),backgroundColor:"rgba(224,92,92,.8)",borderRadius:4}
+        ]},
+        options:{responsive:true,maintainAspectRatio:false,
+          plugins:{legend:{position:"top",labels:{color:t.txt,font:{size:10},boxWidth:10}}},
+          scales:{x:{stacked:true,ticks:{color:t.txt},grid:{display:false}},
+                  y:{stacked:true,ticks:{color:t.txt,precision:0},grid:{color:t.grid},beginAtZero:true}}}});
+    }
+  }
+  var nota=document.getElementById("orc-intel-nota");
+  if(nota){
+    var msg="";
+    if(!decididas.length){ msg="Ainda não há propostas decididas (adjudicadas/não adjudicadas) para analisar."; }
+    else {
+      msg="Em "+decididas.length+" concursos decididos, ganhámos "+adj.length+" ("+taxa+"%).";
+      if(primNaoAdj>0) msg+=" Ficámos em 1.º mas sem adjudicação em "+primNaoAdj+" caso"+(primNaoAdj===1?"":"s")+".";
+      if(distMed!=null) msg+=" Nas perdidas com valor do vencedor, estivémos em média "+(distMed>0?(distMed.toFixed(1)+"% acima"):(Math.abs(distMed).toFixed(1)+"% abaixo"))+" do vencedor.";
+      var mk=Object.keys(motivos).sort(function(a,b){return motivos[b]-motivos[a];});
+      if(mk.length) msg+=" Motivos de perda: "+mk.map(function(m){return m+" ("+motivos[m]+")";}).join(", ")+".";
+    }
+    nota.textContent=msg;
+  }
+}
+
+// ── Resumo (texto) para copiar ou enviar por email ────────────
+function _resumoTexto(){
+  var abertas=propostas.filter(function(p){return ESTADOS_FECHADOS.indexOf(p.estado)===-1;});
+  var atraso=[],urgente=[],habFalta=[],decidirSemana=[];
+  abertas.forEach(function(p){
+    var pr=calcPrazo(p);
+    if(pr.tipo==="atraso") atraso.push({p:p,pr:pr});
+    else if(pr.tipo==="urgente") urgente.push({p:p,pr:pr});
+    if(Array.isArray(p.habilitacao)&&p.habilitacao.length){
+      var falta=p.habilitacao.filter(function(h){return !h.feito;}).length;
+      if(falta>0 && pr.dias!==null && pr.dias<=10) habFalta.push({p:p,falta:falta});
+    }
+    if(p.data_decisao){
+      var dd=Math.round((new Date(p.data_decisao+"T00:00:00")-new Date().setHours(0,0,0,0))/86400000);
+      if(dd>=0 && dd<=7) decidirSemana.push({p:p,dd:dd});
+    }
+  });
+  function nome(p){ return (p.codigo?p.codigo+" — ":"")+(p.designacao||"(sem nome)"); }
+  var L=[];
+  L.push("RESUMO DE PROPOSTAS — "+new Date().toLocaleDateString("pt-PT")); L.push("");
+  L.push("EM ATRASO ("+atraso.length+"):");
+  atraso.length?atraso.forEach(function(x){L.push("  • "+nome(x.p)+" — "+x.pr.txt);}):L.push("  (nenhuma)"); L.push("");
+  L.push("URGENTES — até 5 dias ("+urgente.length+"):");
+  urgente.length?urgente.forEach(function(x){L.push("  • "+nome(x.p)+" — "+x.pr.txt);}):L.push("  (nenhuma)"); L.push("");
+  L.push("HABILITAÇÃO POR COMPLETAR ("+habFalta.length+"):");
+  habFalta.length?habFalta.forEach(function(x){L.push("  • "+nome(x.p)+" — faltam "+x.falta+" documento(s)");}):L.push("  (nenhuma)"); L.push("");
+  L.push("A DECIDIR ESTA SEMANA ("+decidirSemana.length+"):");
+  decidirSemana.length?decidirSemana.sort(function(a,b){return a.dd-b.dd;}).forEach(function(x){L.push("  • "+nome(x.p)+" — decisão em "+(x.dd===0?"hoje":x.dd+" dia(s)"));}):L.push("  (nenhuma)");
+  return L.join("\n");
+}
+function copiarResumo(){
+  var texto=_resumoTexto();
+  function feito(){ _toast("✓ Resumo copiado — cola no email/chat"); }
+  function fallback(){
+    try{ var ta=document.createElement("textarea"); ta.value=texto; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); document.body.removeChild(ta); feito(); }
+    catch(e){ _toast("Não foi possível copiar automaticamente.", true); }
+  }
+  try{
+    if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(texto).then(feito, fallback);
+    else fallback();
+  }catch(e){ fallback(); }
+}
+function enviarResumoEmail(){
+  var assunto="Resumo de propostas — "+new Date().toLocaleDateString("pt-PT");
+  window.location.href="mailto:?subject="+encodeURIComponent(assunto)+"&body="+encodeURIComponent(_resumoTexto());
+}
+
+// ── Ponte para backup: exportar/importar propostas ────────────
+function exportarDadosORC(){ return { ativas: propostas||[], arquivadas: arquivadas||[] }; }
+function importarDadosORC(d){
+  if(!d) return;
+  if(Array.isArray(d.propostas)) propostas = d.propostas;
+  if(Array.isArray(d.arquivadas)) arquivadas = d.arquivadas;
+  if(!Array.isArray(propostas)) propostas=[];
+  if(!Array.isArray(arquivadas)) arquivadas=[];
+  if(typeof _orcSnapshotTirar==="function") _orcSnapshotTirar();
+  salvar(); salvarArquivo();
+  if(window._user && window.sb){
+    propostas.concat(arquivadas).forEach(function(p){ syncPropostaToDB(p).catch(function(e){console.error(e);}); });
+  }
+  if(typeof render==="function") render();
+  if(typeof renderArquivo==="function") renderArquivo();
+}
+
 window.ORC = {
   render: render,
   editar: abrirModal,
@@ -9664,6 +10165,14 @@ window.ORC = {
   removerConcorrente: removerConcorrente,
   gravarBase: gravarBase,
   abrirFolha: function(id){ if(typeof frAbrir==='function') frAbrir(id); },
+  habToggle: habToggle,
+  habAdd: habAdd,
+  habRemove: habRemove,
+  copiarResumo: copiarResumo,
+  enviarResumoEmail: enviarResumoEmail,
+  exportarDados: exportarDadosORC,
+  importarDados: importarDadosORC,
+  calcDistVencedor: calcDistVencedor,
   _calc: _calcClassificacao,
   _salvar: salvar,
   _toastFn: _toast,
