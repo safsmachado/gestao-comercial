@@ -51,7 +51,7 @@ body{font-family:"DM Sans",sans-serif;background:var(--bg);color:var(--tx);min-h
 .nav{display:flex;gap:2px;padding:0 28px;background:var(--sf);border-bottom:1px solid var(--bd);overflow-x:auto}
 .nb{padding:12px 16px;font-size:13px;font-weight:500;color:var(--tx2);background:none;border:none;cursor:pointer;white-space:nowrap;border-bottom:2px solid transparent;transition:all .2s;font-family:inherit}
 .nb:hover{color:var(--tx);background:rgba(59,111,212,.05)}.nb.act{color:var(--ac);border-bottom-color:var(--ac);font-weight:600}
-.main{padding:24px 28px;max-width:1600px;margin:0 auto}
+.main{padding:24px 28px;max-width:none;margin:0}
 .panel{display:none}.panel.act{display:block}
 .krow{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px}
 .kpi{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:18px 20px;position:relative;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.06)}
@@ -675,6 +675,20 @@ nav.nav, .nav{
 @keyframes _spin{to{transform:rotate(360deg)}}
 .exp-msg{color:var(--tx2);font-family:"DM Mono",monospace;font-size:12px}
 </style>
+<style id="colmove-style">
+/* ── Reordenar colunas (todos os separadores) ───────────── */
+.colmove thead th{cursor:grab;position:relative;user-select:none}
+.colmove thead th:active{cursor:grabbing}
+.colmove thead th::before{content:"\2807";opacity:.28;margin-right:5px;font-size:11px;vertical-align:middle}
+.colmove thead th.cm-drag{opacity:.45}
+.colmove thead th.cm-over{box-shadow:inset 3px 0 0 var(--ac)}
+.cm-menu{position:fixed;z-index:99999;background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:6px;box-shadow:0 12px 36px rgba(0,0,0,.5);display:flex;gap:4px;align-items:center;font-family:"DM Sans",sans-serif}
+.cm-menu button{background:var(--sf2);border:1px solid var(--bd);color:var(--tx);border-radius:7px;padding:6px 10px;font-size:13px;cursor:pointer;font-family:inherit;white-space:nowrap}
+.cm-menu button:hover{border-color:var(--ac);color:var(--ac)}
+.cm-menu .cm-lbl{font-size:11px;color:var(--tx2);padding:0 6px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cm-menu button.cm-reset{color:var(--wa)}
+</style>
+
 </head>
 <body>
 <!--
@@ -833,6 +847,9 @@ nav.nav, .nav{
       
       <div class="cc"><h3 id="t-ch-temp">Evolução Temporal — Início Previsto</h3><div class="cw"><canvas id="ch-temp"></canvas></div></div>
     </div>
+  <div class="cgrid" style="margin-top:0">
+    <div class="cc" style="grid-column:1/-1"><h3>💶 Faturação Prevista — próximos 12 meses <span id="fatprev-total" style="color:var(--tx3);font-weight:400;font-size:12px"></span></h3><div class="cw"><canvas id="ch-faturacao-prev"></canvas></div></div>
+  </div>
   <div class="cgrid" style="margin-top:0">
     <div class="cc"><h3>Valor Médio Adjudicação / Mês</h3><div class="cw"><canvas id="ch-val-medio"></canvas></div></div>
     <div class="cc"><h3>Nº de Obras por Mês</h3><div class="cw"><canvas id="ch-n-medio"></canvas></div></div>
@@ -2072,7 +2089,7 @@ function markObraDirty(id){
 // Aqui substituímos por: verificar sessão -> se ok, postLoginSetup -> senão mostrar login
 
 // ═══ VERSÃO DO FICHEIRO — atualizar aqui a cada alteração ═══
-const APP_VERSAO="v37 · 27/05/2026";
+const APP_VERSAO="v42 · 31/05/2026";
 // Auto-bump: call bumpVersao() whenever a change is saved to the document
 function bumpVersao(){
   const el=document.getElementById('hd-versao');
@@ -2774,8 +2791,24 @@ function abrirNovaObra(){
   window.scrollTo(0,0);
 }
 
-// ════════════════════════════════════════════════════════════════
-//  GESTÃO COMERCIAL — SISTEMA DE ÁREAS (Carteira de Obras / Orçamentação)
+// duplicar obra: cria uma cópia editável (para obras em fases ou tipologias repetidas)
+function duplicarObra(id){
+  var orig = obras.find(function(o){return o.id===id;});
+  if(!orig){ if(window.showToast) showToast("Obra não encontrada.", true); return; }
+  var c = JSON.parse(JSON.stringify(orig));
+  c.id = "obra_" + Date.now() + "_" + Math.random().toString(36).slice(2,7);
+  c.designacao = (orig.designacao||"") + " (cópia)";
+  c.execucoes = [];          // não copiar a execução mensal
+  c.trabalhos_mais = 0;
+  if("codigo" in c) c.codigo = "";   // novo código a definir
+  obras.unshift(c);
+  salvar();
+  if(typeof renderTab==="function") renderTab();
+  if(typeof renderDash==="function") renderDash();
+  if(window.showToast) showToast("Obra duplicada — usa o ✎ para ajustar os dados");
+}
+window.duplicarObra = duplicarObra;
+
 // ════════════════════════════════════════════════════════════════
 let _areaActual = localStorage.getItem("gc_area_actual") || "obras";
 // áreas a que o utilizador tem acesso. admin = ambas. Default: ambas (até definir no painel).
@@ -4017,7 +4050,54 @@ function renderDashGlobal(){
   // Renderizar análise dinâmica por dimensão
   renderDimSummary();
 
+  renderFaturacaoPrevista();
   renderAnalises("global",obrasVal.slice());
+}
+
+// ── FATURAÇÃO PREVISTA ────────────────────────────────────────
+// Projeta a faturação dos próximos 12 meses a partir do trabalho que falta
+// executar em cada obra (GII em curso/adjudicada), repartido até à conclusão prevista.
+function renderFaturacaoPrevista(){
+  var el=document.getElementById("ch-faturacao-prev");
+  if(!el || typeof Chart==="undefined") return;
+  var HOR=12;
+  var now=new Date();
+  var baseY=now.getFullYear(), baseM=now.getMonth();
+  var meses=[], labels=[];
+  for(var i=1;i<=HOR;i++){
+    var d=new Date(baseY, baseM+i, 1);
+    meses.push(d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0"));
+    labels.push(d.toLocaleDateString("pt-PT",{month:"short",year:"2-digit"}));
+  }
+  var acum={}; meses.forEach(function(m){acum[m]=0;});
+  obras.forEach(function(o){
+    if(o.grupo!=="II") return;
+    if(o.estado!=="Em Curso" && o.estado!=="Adjudicado") return;
+    var vt=(parseFloat(o.valor)||0)+(typeof tmEO==="function"?(parseFloat(tmEO(o))||0):0);
+    var u=uEx(o); var pct=u?(parseFloat(u.percentagem)||0):0;
+    var restante=vt*(100-pct)/100;
+    if(restante<=0.01) return;
+    var fimY, fimM;
+    if(o.data_inicio){
+      var di=new Date(String(o.data_inicio).slice(0,10));
+      if(!isNaN(di)){ var t=new Date(di.getFullYear(), di.getMonth()+prazoFinal(o), 1); fimY=t.getFullYear(); fimM=t.getMonth(); }
+    }
+    if(fimY===undefined){ var t2=new Date(baseY, baseM+(prazoFinal(o)||6), 1); fimY=t2.getFullYear(); fimM=t2.getMonth(); }
+    var nMeses=(fimY-baseY)*12+(fimM-baseM); // do mês atual até à conclusão = nº de meses a partir do próximo mês
+    if(nMeses<1) nMeses=2; // já devia estar concluída → assume faturação nos próximos 2 meses
+    var porMes=restante/nMeses;
+    for(var j=0;j<nMeses && j<meses.length;j++){ acum[meses[j]]+=porMes; }
+  });
+  var dados=meses.map(function(m){return Math.round(acum[m]);});
+  var total=dados.reduce(function(s,v){return s+v;},0);
+  var tEl=document.getElementById("fatprev-total");
+  if(tEl) tEl.textContent = total>0 ? ("· total estimado "+fE(total)) : "· sem obras em execução";
+  charts.fatprev=mkChart("ch-faturacao-prev","bar",
+    {labels:labels,datasets:[{label:"Faturação prevista",data:dados,backgroundColor:"#38d9a9",borderRadius:5}]},
+    {responsive:true,maintainAspectRatio:false,
+     plugins:{legend:{display:false},tooltip:{callbacks:{label:function(c){return fE(c.raw);}}}},
+     scales:{y:{beginAtZero:true,ticks:{color:"#6b7280",callback:function(v){return fE(v);}},grid:{color:"#e2e6ef"}},
+             x:{ticks:{color:"#4a5568",maxRotation:45,font:{size:10}},grid:{display:false}}}});
 }
 
 function renderDashGI(){
@@ -4265,6 +4345,7 @@ function renderGrupoTabela(lista,grupo){
           <td><div style="display:flex;gap:3px;justify-content:center">
             <button class="btn bg2 bxs" onclick="verDet('${o.id}')">Ver</button>
             <button class="btn bg2 bxs" onclick="editObra('${o.id}')">✎</button>
+            <button class="btn bg2 bxs" title="Duplicar obra" onclick="duplicarObra('${o.id}')">⧉</button>
             <button class="btn ba bxs" onclick="arquivarObra('${o.id}')">📦</button>
           </div></td>
         </tr>`;
@@ -4313,6 +4394,7 @@ function renderGrupoTabela(lista,grupo){
             <button class="btn bg2 bxs" onclick="verDet('${o.id}')">Ver</button>
             ${o.estado!=='Concluído'?`<button class="btn bs bxs" onclick="abrirModal('${o.id}')">+Mês</button>`:''}
             <button class="btn bg2 bxs" onclick="editObra('${o.id}')">✎</button>
+            <button class="btn bg2 bxs" title="Duplicar obra" onclick="duplicarObra('${o.id}')">⧉</button>
             <button class="btn ba bxs" onclick="arquivarObra('${o.id}')">📦</button>
           </div></td>
         </tr>`;
@@ -6388,6 +6470,8 @@ function _wrapCreate(){
           <div class="orc-field"><label>Data de Revisão</label><input type="date" id="orc-data_revisao"></div>
           <div class="orc-field"><label>Data Prevista de Decisão</label><input type="date" id="orc-data_decisao"></div>
           <div class="orc-field"><label>Data de Adjudicação</label><input type="date" id="orc-data_adjudicacao"></div>
+          <div class="orc-field"><label>Próxima Ação <span style="color:var(--tx3,#8892aa)">(follow-up comercial)</span></label><input type="text" id="orc-proxima_acao" placeholder="Ex.: ligar ao dono de obra"></div>
+          <div class="orc-field"><label>Data da Próxima Ação</label><input type="date" id="orc-proxima_acao_data"></div>
         </div>
       </div>
 
@@ -6835,60 +6919,8 @@ function _injectarDadosTeste(){
       documentos:[], criado_em:ts(-200), ultima_alteracao:ts(-150), revisao_atual:"V1", num_revisoes:1, obra_id:"", obra_codigo:"" }
   ];
 }
-function editarCelula(td){
-  if(!podeEditar()){ _toast("Sem permissão.", true); return; }
-  if(td._editando) return;
-  td._editando = true;
-  var pid = td.getAttribute("data-pid");
-  var campo = td.getAttribute("data-campo");
-  var p = propostas.find(function(x){return x.id===pid;});
-  if(!p){ td._editando=false; return; }
-  var valorActual = p[campo]||"";
-  var input = document.createElement("input");
-  input.type = "text";
-  input.value = valorActual;
-  input.style.cssText = "width:100%;border:1px solid var(--ac);border-radius:3px;padding:2px 4px;font-size:inherit;font-family:inherit";
+// (versão antiga de editarCelula removida — substituída pela versão com 4 args)
 
-  // Criar datalist próprio (fora do modal, sempre acessível)
-  if(campo==="concorrente"){
-    var dlId = "orc-dl-inline-conc";
-    var dl = document.getElementById(dlId);
-    if(!dl){ dl = document.createElement("datalist"); dl.id = dlId; document.body.appendChild(dl); }
-    var nomes = (window.entListaActivos) ? window.entListaActivos("concorrentes") : [];
-    // garantir que "Sá Machado" está sempre disponível
-    if(nomes.indexOf("Sá Machado")===-1) nomes.unshift("Sá Machado");
-    dl.innerHTML = nomes.map(function(n){ return '<option value="'+esc(n)+'">'; }).join("");
-    input.setAttribute("list", dlId);
-  } else if(campo==="cliente"){
-    var dlId2 = "orc-dl-inline-cli";
-    var dl2 = document.getElementById(dlId2);
-    if(!dl2){ dl2 = document.createElement("datalist"); dl2.id = dlId2; document.body.appendChild(dl2); }
-    // clientes existentes nas propostas
-    var clientes = [];
-    propostas.forEach(function(x){ if(x.cliente && clientes.indexOf(x.cliente)===-1) clientes.push(x.cliente); });
-    clientes.sort(function(a,b){return a.localeCompare(b,"pt");});
-    dl2.innerHTML = clientes.map(function(n){ return '<option value="'+esc(n)+'">'; }).join("");
-    input.setAttribute("list", dlId2);
-  }
-
-  td.innerHTML = "";
-  td.appendChild(input);
-  input.focus();
-  input.select();
-  function guardar(){
-    var novo = input.value.trim();
-    p[campo] = novo;
-    td._editando = false;
-    window._lastPropostaEdited = p;
-    salvar();
-    render();
-  }
-  input.addEventListener("blur", guardar);
-  input.addEventListener("keydown", function(e){
-    if(e.key==="Enter"){ input.blur(); }
-    else if(e.key==="Escape"){ td._editando=false; render(); }
-  });
-}
 function aplicarPredefinicoes(){
   if(!podeEditar()){ _toast("Sem permissão.", true); return; }
   var n = 0;
@@ -7086,7 +7118,7 @@ function camposForm(){
   return ["codigo","designacao","pais","localidade","cliente","tipo_cliente",
     "tipo_obra","tipo_intervencao","dono","concorrente","gestor","responsavel",
     "estado","prioridade","data_rececao","data_limite","data_entrega",
-    "data_revisao","data_decisao","data_adjudicacao","valor_base_concurso",
+    "data_revisao","data_decisao","data_adjudicacao","proxima_acao","proxima_acao_data","valor_base_concurso",
     "valor_estimado","valor_proposta","valor_revisto","valor_vencedor","motivo_perda","margem","probabilidade","prazo",
     "num_revisoes","revisao_atual","ultimo_contacto","observacoes",
     "estrategia","pormenores","notas"];
@@ -7179,6 +7211,7 @@ function _toDB(p){
     valor_estimado: p.valor_estimado||0, valor_proposta: p.valor_proposta||0,
     valor_revisto: p.valor_revisto||null, margem: p.margem||null,
     valor_vencedor: p.valor_vencedor||null, motivo_perda: p.motivo_perda||null,
+    proxima_acao: p.proxima_acao||null, proxima_acao_data: p.proxima_acao_data||null,
     probabilidade: p.probabilidade||null, prazo: p.prazo||null,
     data_rececao: p.data_rececao||null, data_limite: p.data_limite||null,
     data_entrega: p.data_entrega||null, data_decisao: p.data_decisao||null,
@@ -7198,6 +7231,7 @@ function _fromDB(r){
     valor_estimado:r.valor_estimado||0, valor_proposta:r.valor_proposta||0,
     valor_revisto:r.valor_revisto, margem:r.margem, probabilidade:r.probabilidade,
     valor_vencedor:r.valor_vencedor, motivo_perda:r.motivo_perda,
+    proxima_acao:r.proxima_acao, proxima_acao_data:r.proxima_acao_data,
     prazo:r.prazo, data_rececao:r.data_rececao, data_limite:r.data_limite,
     data_entrega:r.data_entrega, data_decisao:r.data_decisao,
     observacoes:r.observacoes,
@@ -7214,7 +7248,7 @@ async function syncPropostaToDB(p){
   var res = await window.sb.from('propostas').upsert(payload, {onConflict:'id'});
   if(res.error){
     // Provavelmente faltam colunas opcionais novas na BD — tentar sem elas para NUNCA perder a gravação
-    var OPCIONAIS = ["habilitacao","motivo_perda","valor_vencedor"];
+    var OPCIONAIS = ["habilitacao","motivo_perda","valor_vencedor","proxima_acao","proxima_acao_data"];
     var basico = {}; Object.keys(payload).forEach(function(k){ if(OPCIONAIS.indexOf(k)===-1) basico[k]=payload[k]; });
     var res2 = await window.sb.from('propostas').upsert(basico, {onConflict:'id'});
     if(window._syncEnd) window._syncEnd(!!res2.error);
@@ -7232,6 +7266,33 @@ window.syncPropostaToDB = syncPropostaToDB;
 window.deletePropostaFromDB = deletePropostaFromDB;
 window.carregarORC = carregar;
 
+
+// duplicar: cria uma cópia editável de uma proposta (ponto de partida para concurso parecido)
+function duplicarProposta(id){
+  if(!podeEditar()){ _toast("Sem permissão.", true); return; }
+  var orig = propostas.find(function(x){return x.id===id;}) || (typeof arquivadas!=="undefined" ? arquivadas.find(function(x){return x.id===id;}) : null);
+  if(!orig){ _toast("Proposta não encontrada.", true); return; }
+  var c = JSON.parse(JSON.stringify(orig));
+  c.id = "prop_" + Date.now() + "_" + Math.random().toString(36).slice(2,7);
+  c.codigo = (typeof proxCodigoOrc==="function") ? proxCodigoOrc() : "";
+  c.designacao = (orig.designacao||"") + " (cópia)";
+  c.estado = "Em Preparação";
+  // limpar tudo o que é específico da proposta anterior
+  c.classificacao = ""; c.valor_vencedor = null; c.motivo_perda = "";
+  c.data_entrega = ""; c.data_adjudicacao = ""; c.data_decisao = ""; c.data_rececao = ""; c.data_limite = ""; c.data_revisao = "";
+  c.obra_id = ""; c.obra_codigo = "";
+  c.timeline = []; c.revisoes = []; c.num_revisoes = 0; c.revisao_atual = "";
+  c.arquivada_em = null;
+  c.criado_em = new Date().toISOString();
+  c.ultima_alteracao = new Date().toISOString();
+  // mantém: cliente, dono, concorrente, país, valores estimados, margem, prazo, responsável e a checklist de habilitação
+  propostas.unshift(c);
+  window._lastPropostaEdited = c;
+  salvar();
+  render();
+  _toast("Proposta duplicada — confirma os dados e grava");
+  try{ abrirModal(c.id); }catch(e){}
+}
 
 // arquivar: tira das activas, mantém todo o histórico, mete no arquivo
 // Se houver propostas seleccionadas (checkboxes), arquiva TODAS as seleccionadas.
@@ -7409,10 +7470,23 @@ function eliminarDoArquivo(id){
 //  RENDER — KPIs, gráficos e tabela
 // ══════════════════════════════════════════════════════════════
 // Uma proposta "tem alerta" se está aberta e em atraso/urgente, ou perto do prazo com habilitação incompleta
+var MARGEM_MINIMA = 8; // % — propostas abertas com margem abaixo disto são assinaladas
+function _margemBaixa(p){
+  if(ESTADOS_FECHADOS.indexOf(p.estado)!==-1) return false;
+  return (p.margem!=null && p.margem!=="" && parseFloat(p.margem) < MARGEM_MINIMA);
+}
+function _acaoVencida(p){
+  if(ESTADOS_FECHADOS.indexOf(p.estado)!==-1) return false;
+  if(!p.proxima_acao_data) return false;
+  var dd = Math.round((new Date(p.proxima_acao_data+"T00:00:00")-new Date().setHours(0,0,0,0))/86400000);
+  return dd<=0; // hoje ou em atraso
+}
 function _temAlerta(p){
   if(ESTADOS_FECHADOS.indexOf(p.estado)!==-1) return false;
   var pr=calcPrazo(p);
   if(pr.tipo==="atraso"||pr.tipo==="urgente") return true;
+  if(_margemBaixa(p)) return true;
+  if(_acaoVencida(p)) return true;
   if(Array.isArray(p.habilitacao)&&p.habilitacao.length){
     var falta=p.habilitacao.filter(function(h){return !h.feito;}).length;
     if(falta>0 && pr.dias!==null && pr.dias<=10) return true;
@@ -7453,6 +7527,12 @@ function renderKPIs(){
   var taxa = decididas.length ? Math.round(adjudicadas.length/decididas.length*100) : 0;
   var valNegoc = emCurso.reduce(function(s,p){return s+(parseFloat(p.valor_proposta)||parseFloat(p.valor_estimado)||0);},0);
   var valAdj = adjudicadas.reduce(function(s,p){return s+(parseFloat(p.valor_proposta)||0);},0);
+  // valor ponderado do pipeline = valor × probabilidade (só propostas em curso com probabilidade definida)
+  var comProb = emCurso.filter(function(p){return p.probabilidade!=null && p.probabilidade!=="";});
+  var valPonderado = comProb.reduce(function(s,p){
+    var v = parseFloat(p.valor_revisto)||parseFloat(p.valor_proposta)||parseFloat(p.valor_estimado)||0;
+    return s + v*(parseFloat(p.probabilidade)||0)/100;
+  },0);
   // prazo médio de resposta (recepção -> entrega)
   var difs = [];
   propostas.forEach(function(p){
@@ -7470,6 +7550,7 @@ function renderKPIs(){
     {cls:"ac2", lbl:"Adjudicadas", val:adjudicadas.length, sub:"taxa "+taxa+"%"},
     {cls:"ac2", lbl:"Valor Adjudicado", val:fmtEUR(valAdj), sub:""},
     {cls:"wa",  lbl:"Valor em Negociação", val:fmtEUR(valNegoc), sub:""},
+    {cls:"ac2", lbl:"Receita Esperada", val:fmtEUR(valPonderado), sub:comProb.length+" de "+emCurso.length+" com probabilidade"},
     {cls:"ac",  lbl:"Prazo Médio Resposta", val:(prazoMedio==="—"?"—":prazoMedio+" dias"), sub:"recepção → entrega"},
     {cls:"dg",  lbl:"Em Atraso", val:atraso, sub:"requerem atenção"}
   ];
@@ -7772,6 +7853,7 @@ function _linhaProposta(p, editavel){
     acoes += ' <span class="orc-badge orc-est-adj" style="cursor:default" title="Já transferida">✓ Obra</span>';
   }
   if(editavel) acoes += ' <button class="orc-btn sec sm" onclick="ORC.editar(\''+p.id+'\')">Editar</button>';
+  if(editavel) acoes += ' <button class="orc-btn sec sm" title="Duplicar esta proposta (criar uma cópia editável)" onclick="ORC.duplicar(\''+p.id+'\')">⧉</button>';
   if(editavel) acoes += ' <button class="orc-btn sec sm" title="Arquivar proposta" onclick="ORC.arquivar(\''+p.id+'\')">🗄</button>';
   var chkCell;
   if(p.obra_id){
@@ -7803,7 +7885,7 @@ function _linhaProposta(p, editavel){
     '<td class="orc-hide-sm">'+esc(p.pais||"—")+'</td>'+
     '<td class="orc-hide-sm orc-td-cli orc-inline-edit" title="Clicar para editar" data-pid="'+esc(p.id)+'" data-campo="concorrente" onclick="event.stopPropagation();ORC.editarCelula(this)">'+esc(p.concorrente||"—")+'</td>'+
     '<td><span class="orc-badge '+estCls+'">'+esc(p.estado||"—")+'</span></td>'+
-    '<td>'+(valor?fmtEUR(valor):"—")+'</td>'+
+    '<td>'+(valor?fmtEUR(valor):"—")+(_margemBaixa(p)?' <span title="Margem '+esc(String(p.margem))+'% — abaixo do mínimo de '+MARGEM_MINIMA+'%" style="color:#e05c5c;font-size:11px;white-space:nowrap">⚠ '+esc(String(p.margem))+'%</span>':'')+'</td>'+
     '<td class="orc-hide-sm">'+(p.data_limite?fmtData(p.data_limite):"—")+'</td>'+
     '<td class="orc-hide-sm"><span class="orc-prazo orc-prazo-'+pr.tipo+'"><span class="orc-prazo-dot '+pr.tipo+'"></span>'+pr.txt+'</span></td>'+
     '<td class="orc-hide-sm"><span class="orc-prio '+prioCls+'">'+prio+'</span></td>'+
@@ -8098,6 +8180,11 @@ function renderDetalhe(){
   dados += linhaDado("Prioridade", esc(p.prioridade||"Média"));
   dados += linhaDado("Prazo", '<span class="orc-prazo orc-prazo-'+pr.tipo+'">'+pr.txt+'</span>');
   if(p.estado==="Não Adjudicado" && (p.motivo_perda||"").trim()) dados += linhaDado("Motivo de Perda", '<span style="color:#e05c5c">'+esc(p.motivo_perda)+'</span>');
+  if((p.proxima_acao||"").trim() || p.proxima_acao_data){
+    var _av=_acaoVencida(p);
+    var _ad=p.proxima_acao_data?fmtData(p.proxima_acao_data):"";
+    dados += linhaDado("Próxima Ação", '<span style="color:'+(_av?"#f5a623":"var(--tx,#e6e9ef)")+'">'+esc(p.proxima_acao||"—")+(_ad?' <span style="color:var(--tx3,#8892aa)">('+_ad+')</span>':'')+'</span>');
+  }
   dados += '</div></div>';
 
   dados += '<div class="orc-det-sec"><div class="orc-fsec-tit">Datas</div><div class="orc-dd-grid">';
@@ -8731,6 +8818,8 @@ function marcarEditavel(td, id, campo, tipo){
 }
 
 function editarCelula(td, id, campo, tipo){
+  // compatibilidade: se chamada como editarCelula(this), lê os atributos da célula
+  if(id===undefined){ id = td.getAttribute("data-pid"); campo = td.getAttribute("data-campo"); tipo = tipo || "text"; }
   var p = propostas.find(function(x){return x.id===id;});
   if(!p) return;
   var valorActual = p[campo]==null ? "" : p[campo];
@@ -8811,7 +8900,7 @@ var TIPOS_DOC = ["Email","PDF","Proposta","Revisão","Memória Descritiva",
 var _docAnexoPendente = null;  // {nome, tamanho} do ficheiro escolhido (upload real na fase Supabase)
 function anexoSelecionado(file){
   if(!file){ _docAnexoPendente=null; return; }
-  _docAnexoPendente = { nome:file.name, tamanho:file.size };
+  _docAnexoPendente = { nome:file.name, tamanho:file.size, file:file };
   var el=document.getElementById("orc-doc-anexo-nome");
   if(el) el.textContent = file.name+" ("+_fmtTamanho(file.size)+") — será enviado ao guardar na nuvem";
   // auto-preencher o nome do documento se vazio
@@ -8836,10 +8925,13 @@ function renderDocumentos(p, editavel){
   cont.innerHTML = docs.map(function(d){
     var btnDel = editavel ? '<button class="orc-tl-del" title="Remover" onclick="ORC.removerDoc(\''+d.id+'\')">×</button>' : '';
     var link = "";
-    if(d.ficheiro_url){
+    if(d.storage_path){
+      link = '<button type="button" class="orc-doc-link" style="background:none;border:none;padding:0;cursor:pointer;color:var(--ac2)" onclick="ORC.abrirAnexo(\''+d.id+'\')">↗ abrir ficheiro</button>'+
+             ' <span class="orc-doc-anexo-nome" style="display:inline">'+esc(d.ficheiro_nome||"")+'</span>';
+    } else if(d.ficheiro_url){
       link = '<a href="'+esc(d.ficheiro_url)+'" target="_blank" class="orc-doc-link">↗ abrir ficheiro</a>';
     } else if(d.ficheiro_nome){
-      link = '<span class="orc-doc-anexo-pend">📎 '+esc(d.ficheiro_nome)+' ('+_fmtTamanho(d.ficheiro_tamanho||0)+') — pendente de envio para a nuvem</span>';
+      link = '<span class="orc-doc-anexo-pend">📎 '+esc(d.ficheiro_nome)+' ('+_fmtTamanho(d.ficheiro_tamanho||0)+') — a enviar / pendente</span>';
     } else if(d.link){
       link = '<a href="'+esc(d.link)+'" target="_blank" class="orc-doc-link">↗ '+esc(d.link.length>40?d.link.slice(0,40)+"…":d.link)+'</a>';
     }
@@ -8885,6 +8977,8 @@ function adicionarDocumento(){
     storage_path: ""   // SUPABASE: preencher com o caminho no Storage após upload
   });
   p.ultima_alteracao = new Date().toISOString();
+  var _ficheiroParaEnviar = _docAnexoPendente ? _docAnexoPendente.file : null;
+  var _docCriado = p.documentos[p.documentos.length-1];
   salvar();
   document.getElementById("orc-doc-nome").value = "";
   document.getElementById("orc-doc-nota").value = "";
@@ -8894,13 +8988,64 @@ function adicionarDocumento(){
   var anexoEl=document.getElementById("orc-doc-anexo-nome"); if(anexoEl) anexoEl.textContent="";
   _docAnexoPendente = null;
   renderDocumentos(p, podeEditar());
-  _toast("✓ Documento registado");
+  if(_ficheiroParaEnviar){ _uploadAnexo(p, _docCriado, _ficheiroParaEnviar); _toast("A enviar ficheiro para a nuvem…"); }
+  else { _toast("✓ Documento registado"); }
+}
+
+// envia o ficheiro para o Supabase Storage (bucket 'documentos') e guarda o caminho
+async function _uploadAnexo(p, doc, file){
+  if(!file || !doc) return;
+  if(!window.sb || !window._user){
+    _toast("Ficheiro registado localmente. Inicia sessão para o enviar para a nuvem.", true);
+    return;
+  }
+  var BUCKET = "documentos";
+  var nomeLimpo = file.name.replace(/[^\w.\-]+/g,"_");
+  var path = "propostas/" + p.id + "/" + doc.id + "_" + nomeLimpo;
+  try{
+    if(window._syncStart) window._syncStart();
+    var up = await window.sb.storage.from(BUCKET).upload(path, file, { upsert:true });
+    if(up.error) throw up.error;
+    doc.storage_path = path;
+    if(window._syncEnd) window._syncEnd(false);
+    salvar();
+    var pp = propostas.find(function(x){return x.id===detalheAtual;});
+    if(pp && pp.id===p.id) renderDocumentos(pp, podeEditar());
+    _toast("✓ Ficheiro enviado para a nuvem");
+  }catch(err){
+    if(window._syncEnd) window._syncEnd(true);
+    console.error("upload anexo:", err);
+    _toast("Não foi possível enviar o ficheiro (confirma o armazenamento no Supabase). O registo ficou guardado.", true);
+  }
+}
+
+// abre um anexo: gera um link temporário seguro a partir do caminho no Storage
+async function abrirAnexo(docId){
+  var p = propostas.find(function(x){return x.id===detalheAtual;}) || (typeof arquivadas!=="undefined"?arquivadas.find(function(x){return x.id===detalheAtual;}):null);
+  if(!p) return;
+  var doc = (p.documentos||[]).find(function(d){return d.id===docId;});
+  if(!doc || !doc.storage_path){ _toast("Ficheiro ainda não enviado.", true); return; }
+  if(!window.sb){ _toast("Sem ligação à nuvem.", true); return; }
+  try{
+    var signed = await window.sb.storage.from("documentos").createSignedUrl(doc.storage_path, 60*60);
+    if(signed && signed.data && signed.data.signedUrl){ window.open(signed.data.signedUrl, "_blank"); return; }
+    throw (signed && signed.error) || new Error("sem URL");
+  }catch(e){
+    // fallback: bucket público
+    try{ var pub = window.sb.storage.from("documentos").getPublicUrl(doc.storage_path); if(pub && pub.data && pub.data.publicUrl){ window.open(pub.data.publicUrl, "_blank"); return; } }catch(e2){}
+    console.error("abrirAnexo:", e); _toast("Não foi possível abrir o ficheiro.", true);
+  }
 }
 function removerDocumento(docId){
   if(!podeEditar()){ _toast("Sem permissão.", true); return; }
   var p = propostas.find(function(x){return x.id===detalheAtual;});
   if(!p) return;
   if(!confirm("Remover este registo de documento?")) return;
+  var doc = (p.documentos||[]).find(function(d){return d.id===docId;});
+  // best-effort: remover também do Storage
+  if(doc && doc.storage_path && window.sb){
+    try{ window.sb.storage.from("documentos").remove([doc.storage_path]).then(function(){},function(){}); }catch(e){}
+  }
   p.documentos = (p.documentos||[]).filter(function(d){return d.id!==docId;});
   salvar();
   renderDocumentos(p, podeEditar());
@@ -9970,6 +10115,7 @@ function habRemove(pid,hid){
   renderHabilitacao(p,podeEditar());
 }
 
+
 // ══════════════════════════════════════════════════════════════
 //  ALERTAS (prazos a expirar + habilitação em falta)
 // ══════════════════════════════════════════════════════════════
@@ -9981,10 +10127,14 @@ function renderAlertas(){
     var pr=calcPrazo(p);
     var falta=(Array.isArray(p.habilitacao)?p.habilitacao.filter(function(h){return !h.feito;}).length:0);
     var habAlerta = falta>0 && pr.dias!==null && pr.dias<=10;
-    if(pr.tipo!=="atraso" && pr.tipo!=="urgente" && !habAlerta) return;
-    var cor = pr.tipo==="atraso" ? "#e05c5c" : (pr.tipo==="urgente" ? "#f5a623" : "#4f8ef7");
+    var margAlerta = _margemBaixa(p);
+    var acaoAlerta = _acaoVencida(p);
+    if(pr.tipo!=="atraso" && pr.tipo!=="urgente" && !habAlerta && !margAlerta && !acaoAlerta) return;
+    var cor = pr.tipo==="atraso" ? "#e05c5c" : (pr.tipo==="urgente" ? "#f5a623" : (margAlerta ? "#e05c5c" : (acaoAlerta ? "#4f8ef7" : "#4f8ef7")));
     var partes=[];
     if(pr.tipo==="atraso"||pr.tipo==="urgente") partes.push(pr.txt);
+    if(acaoAlerta) partes.push("ação: "+esc(p.proxima_acao||"follow-up"));
+    if(margAlerta) partes.push("margem baixa ("+esc(String(p.margem))+"%)");
     if(habAlerta) partes.push("falta habilitação ("+falta+")");
     var prioridade = pr.tipo==="atraso"?0:(pr.tipo==="urgente"?1:2);
     linhas.push({p:p,cor:cor,txt:partes.join(" · "),ord:prioridade,dias:(pr.dias===null?9999:pr.dias)});
@@ -10161,6 +10311,7 @@ window.ORC = {
   adicionarDoc: adicionarDocumento,
   removerDoc: removerDocumento,
   anexoSelecionado: anexoSelecionado,
+  abrirAnexo: abrirAnexo,
   adicionarConcorrente: adicionarConcorrente,
   removerConcorrente: removerConcorrente,
   gravarBase: gravarBase,
@@ -10192,6 +10343,7 @@ window.ORC = {
   reabrir: function(){ if(detalheAtual) reabrirProposta(detalheAtual); },
   colapso: _alternarColapso,
   arquivar: arquivarProposta,
+  duplicar: duplicarProposta,
   restaurar: restaurarProposta,
   eliminarArq: eliminarDoArquivo,
   arqToggle: arqToggle,
@@ -11233,6 +11385,216 @@ function frImprimir(){ window.print(); }
 
 </script>
 <!-- ███  FIM MODAL FOLHA  ███ -->
+
+<script>
+/* ╔══════════════════════════════════════════════════════════╗
+   ║  REORDENAR COLUNAS — genérico, todos os separadores       ║
+   ║  • arrastar o cabeçalho  • clicar no cabeçalho = menu      ║
+   ║  Não altera os dados nem as funções de render.            ║
+   ║  Por defeito não muda nada; só reordena após acção.       ║
+   ╚══════════════════════════════════════════════════════════╝ */
+(function(){
+  "use strict";
+  var LS="cob_colorder_v1";
+  var defaults={};            // ordem original por tabela (em memória, por sessão)
+  var applying=false;
+
+  function loadAll(){ try{return JSON.parse(localStorage.getItem(LS))||{};}catch(e){return {};} }
+  function saveAll(o){ try{localStorage.setItem(LS,JSON.stringify(o));}catch(e){} }
+
+  function headerRow(t){
+    var h=t.tHead; if(!h||!h.rows.length) return null;
+    for(var r=0;r<h.rows.length;r++){
+      var row=h.rows[r];
+      if(row.cells.length && row.cells[0].tagName==="TH") return row;
+    }
+    return h.rows[0]||null;
+  }
+  function hcells(t){ var hr=headerRow(t); return hr?Array.prototype.slice.call(hr.cells):[]; }
+  function thKey(th,i){
+    var s=(th.textContent||"").replace(/\s+/g," ").trim().toLowerCase();
+    s=s.replace(/^[\u2807\u22ee\s]+/,"");   // tirar o glifo de grip se existir
+    return s || ("col"+i);
+  }
+  function currKeys(t){ return hcells(t).map(thKey); }
+
+  function tableKey(t){
+    if(t.id) return "id:"+t.id;
+    if(t.getAttribute("data-grp")) return "grp:"+t.getAttribute("data-grp");
+    return "h:"+currKeys(t).join("|");
+  }
+
+  function managed(t){
+    var hr=headerRow(t); if(!hr) return false;
+    if(hr.cells.length<2) return false;
+    for(var i=0;i<hr.cells.length;i++) if(hr.cells[i].tagName!=="TH") return false;
+    return true;
+  }
+
+  function ensureDefault(t){
+    var k=tableKey(t);
+    if(!defaults[k]) defaults[k]=currKeys(t);   // 1ª vez = ordem original
+    return defaults[k];
+  }
+
+  function permutation(curr,desired){
+    var used={},order=[];
+    desired.forEach(function(key){
+      var i=curr.indexOf(key);
+      while(i!==-1 && used[i]) i=curr.indexOf(key,i+1);
+      if(i!==-1){ order.push(i); used[i]=true; }
+    });
+    for(var i=0;i<curr.length;i++) if(!used[i]) order.push(i);
+    return order;
+  }
+  function reorderRow(row,order){
+    if(row.cells.length!==order.length) return;        // ignora subtotais/colspan
+    var cells=Array.prototype.slice.call(row.cells);
+    var frag=document.createDocumentFragment();
+    order.forEach(function(idx){ frag.appendChild(cells[idx]); });
+    row.appendChild(frag);
+  }
+  function reorderTo(t,desired){
+    var curr=currKeys(t);
+    var order=permutation(curr,desired);
+    if(order.every(function(v,i){return v===i;})) return; // já está
+    applying=true;
+    try{
+      var hr=headerRow(t); if(hr) reorderRow(hr,order);
+      var bs=t.tBodies;
+      for(var b=0;b<bs.length;b++){ var rows=bs[b].rows; for(var r=0;r<rows.length;r++) reorderRow(rows[r],order); }
+    } finally { applying=false; }
+  }
+
+  function decorate(t){
+    ensureDefault(t);
+    t.classList.add("colmove");
+    hcells(t).forEach(function(th){ if(th.querySelector("input,select,button,textarea,a")){ th.removeAttribute("draggable"); } else { th.setAttribute("draggable","true"); } });
+    var saved=loadAll()[tableKey(t)];
+    if(saved && saved.length) reorderTo(t,saved);
+  }
+
+  function scan(){
+    if(applying) return;
+    var tables=document.querySelectorAll("table");
+    for(var i=0;i<tables.length;i++){ if(managed(tables[i])) decorate(tables[i]); }
+  }
+
+  // ── guardar nova ordem ───────────────────────────────────
+  function persist(t){
+    var all=loadAll(); all[tableKey(t)]=currKeys(t); saveAll(all);
+  }
+  function moveColumn(t,fromKey,beforeKey){
+    var base=(loadAll()[tableKey(t)]||currKeys(t)).slice();
+    var fi=base.indexOf(fromKey); if(fi===-1) return;
+    base.splice(fi,1);
+    var ti=beforeKey?base.indexOf(beforeKey):base.length;
+    if(ti===-1) ti=base.length;
+    base.splice(ti,0,fromKey);
+    var all=loadAll(); all[tableKey(t)]=base; saveAll(all);
+    reorderTo(t,base);
+  }
+  function swapColumn(t,key,dir){
+    var base=(loadAll()[tableKey(t)]||currKeys(t)).slice();
+    var i=base.indexOf(key); var j=i+dir;
+    if(i===-1||j<0||j>=base.length) return;
+    var tmp=base[i]; base[i]=base[j]; base[j]=tmp;
+    var all=loadAll(); all[tableKey(t)]=base; saveAll(all);
+    reorderTo(t,base);
+  }
+  function resetTable(t){
+    var k=tableKey(t);
+    var all=loadAll(); delete all[k]; saveAll(all);
+    if(defaults[k]) reorderTo(t,defaults[k]);
+  }
+
+  // ── arrastar ─────────────────────────────────────────────
+  var dragTh=null;
+  document.addEventListener("dragstart",function(e){
+    var th=e.target.closest && e.target.closest("th");
+    if(!th) return;
+    var t=th.closest("table"); if(!t||!t.classList.contains("colmove")) return;
+    if(th.parentNode.parentNode!==t.tHead) return;     // só cabeçalho
+    dragTh=th; th.classList.add("cm-drag");
+    try{ e.dataTransfer.effectAllowed="move"; e.dataTransfer.setData("text/plain","col"); }catch(_){}
+  });
+  document.addEventListener("dragover",function(e){
+    if(!dragTh) return;
+    var th=e.target.closest && e.target.closest("th");
+    if(!th) return;
+    var t=th.closest("table"); if(!t||t!==dragTh.closest("table")) return;
+    e.preventDefault();
+    var cells=hcells(t); cells.forEach(function(c){ if(c!==th) c.classList.remove("cm-over"); });
+    if(th!==dragTh) th.classList.add("cm-over");
+  });
+  document.addEventListener("drop",function(e){
+    if(!dragTh) return;
+    var th=e.target.closest && e.target.closest("th");
+    var t=dragTh.closest("table");
+    if(th && t && th.closest("table")===t && th!==dragTh){
+      e.preventDefault();
+      var cells=hcells(t); var fromKey=thKey(dragTh,cells.indexOf(dragTh));
+      var beforeKey=thKey(th,cells.indexOf(th));
+      moveColumn(t,fromKey,beforeKey);
+    }
+    cleanupDrag();
+  });
+  document.addEventListener("dragend",cleanupDrag);
+  function cleanupDrag(){
+    if(dragTh) dragTh.classList.remove("cm-drag");
+    document.querySelectorAll(".cm-over").forEach(function(c){c.classList.remove("cm-over");});
+    dragTh=null;
+  }
+
+  // ── menu manual (clique no cabeçalho) ────────────────────
+  var menu=null;
+  function closeMenu(){ if(menu){ menu.remove(); menu=null; } }
+  document.addEventListener("click",function(e){
+    if(menu && !menu.contains(e.target)){ closeMenu(); }
+    var th=e.target.closest && e.target.closest("th");
+    if(!th) return;
+    if(e.target.closest("input,select,button,textarea,a,label")) return;
+    var t=th.closest("table"); if(!t||!t.classList.contains("colmove")) return;
+    if(th.parentNode.parentNode!==t.tHead) return;
+    if(dragTh) return;                                  // estava a arrastar
+    e.stopPropagation();
+    closeMenu();
+    var key=thKey(th,hcells(t).indexOf(th));
+    menu=document.createElement("div"); menu.className="cm-menu";
+    var lbl=(th.textContent||"").replace(/\s+/g," ").trim().replace(/^[\u2807\u22ee]\s*/,"")||"coluna";
+    menu.innerHTML='<span class="cm-lbl" title="'+lbl.replace(/"/g,'&quot;')+'">'+lbl+'</span>';
+    var bL=document.createElement("button"); bL.textContent="◀"; bL.title="Mover para a esquerda";
+    var bR=document.createElement("button"); bR.textContent="▶"; bR.title="Mover para a direita";
+    var bRe=document.createElement("button"); bRe.textContent="↺ Repor"; bRe.className="cm-reset"; bRe.title="Repor ordem original";
+    bL.onclick=function(ev){ev.stopPropagation();swapColumn(t,key,-1);closeMenu();};
+    bR.onclick=function(ev){ev.stopPropagation();swapColumn(t,key,1);closeMenu();};
+    bRe.onclick=function(ev){ev.stopPropagation();resetTable(t);closeMenu();};
+    menu.appendChild(bL); menu.appendChild(bR); menu.appendChild(bRe);
+    document.body.appendChild(menu);
+    var r=th.getBoundingClientRect();
+    var top=r.bottom+4, left=r.left;
+    menu.style.top=top+"px"; menu.style.left=left+"px";
+    var mr=menu.getBoundingClientRect();
+    if(mr.right>window.innerWidth-8) menu.style.left=(window.innerWidth-mr.width-8)+"px";
+    if(mr.bottom>window.innerHeight-8) menu.style.top=(r.top-mr.height-4)+"px";
+  });
+  window.addEventListener("scroll",closeMenu,true);
+  window.addEventListener("resize",closeMenu);
+
+  // ── re-aplicar sempre que as tabelas forem redesenhadas ──
+  var pend=null;
+  var obs=new MutationObserver(function(){
+    if(applying) return;
+    clearTimeout(pend); pend=setTimeout(scan,60);
+  });
+  function start(){
+    scan();
+    obs.observe(document.body,{childList:true,subtree:true});
+  }
+  if(document.readyState==="loading") document.addEventListener("DOMContentLoaded",function(){setTimeout(start,400);});
+  else setTimeout(start,400);
+})();
+</script>
 
 </body>
 </html>
