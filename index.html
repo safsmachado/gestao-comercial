@@ -73,6 +73,8 @@ body{font-family:"DM Sans",sans-serif;background:var(--bg);color:var(--tx);min-h
 .fi input,.fi select,.fi textarea{background:var(--sf2);border:1px solid var(--bd);color:var(--tx);padding:8px 12px;border-radius:7px;font-family:inherit;font-size:13px;outline:none;transition:border-color .2s}
 .fi input:focus,.fi select:focus,.fi textarea:focus{border-color:var(--ac)}
 .fi input::placeholder{color:var(--tx3)}.fi select option{background:var(--sf2)}
+/* Acessibilidade: anel de foco visível para navegação por teclado (não afeta o rato) */
+input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-visible,a:focus-visible,[tabindex]:focus-visible,.orc-btn:focus-visible,.btn:focus-visible{outline:2px solid var(--ac);outline-offset:2px;border-radius:6px}
 .btn{padding:8px 16px;border:none;border-radius:7px;font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:all .15s;white-space:nowrap}
 .bp{background:var(--ac);color:#fff}.bp:hover{opacity:.85}
 .bs{background:var(--ac2);color:#0f1117}.bs:hover{opacity:.85}
@@ -1023,7 +1025,7 @@ nav.nav, .nav{
     <div class="fi"><label>País</label><select id="fp" onchange="renderTab()"><option value="">Todos</option></select></div>
     <div class="fi"><label>Grupo</label><select id="fg" onchange="renderTab()"><option value="">Todos</option><option value="I">I</option><option value="II">II</option></select></div>
     <div class="fi"><label>Estado</label><select id="fest-f" onchange="renderTab()"><option value="">Todos</option></select></div>
-    <div class="fi fi-g"><label>Pesquisa</label><input type="text" id="fs" placeholder="Designação, dono, localidade, código..." oninput="renderTab()"></div>
+    <div class="fi fi-g"><label>Pesquisa</label><input type="text" id="fs" placeholder="Designação, dono, localidade, código..." oninput="_debRender('tab')"></div>
     <button class="btn bg2" onclick="limFilt()">Limpar</button>
   </div>
   <div id="obras-grupos"></div>
@@ -1035,7 +1037,7 @@ nav.nav, .nav{
   <div class="shd"><div><h2>Execução Mensal</h2><p>Grupo II — registo directo por obra</p></div><div class="exp-bar"><button class="btn-pdf" onclick="exportPdfPanel('execucao')">📄 PDF</button><button class="btn-xls" onclick="exportExcelExecucao()">📊 Excel</button></div></div>
   <div class="alrt">💡 Insere a % directamente na tabela. Usa <strong>+ Mês</strong> para registar prorrogação ou observações. Prazo a vermelho = ultrapassado.</div>
   <div class="tb" style="margin-bottom:12px">
-    <div class="fi fi-g"><label>Pesquisar obra</label><input type="text" id="es" placeholder="Pesquisar obra do Grupo II..." oninput="renderExec()"></div>
+    <div class="fi fi-g"><label>Pesquisar obra</label><input type="text" id="es" placeholder="Pesquisar obra do Grupo II..." oninput="_debRender('exec')"></div>
     <div class="fi"><label>País</label><select id="ep" onchange="renderExec()"><option value="">Todos</option></select></div>
   </div>
   <div id="exec-lista"></div>
@@ -1392,7 +1394,7 @@ nav.nav, .nav{
   <div class="admin-section">
     <h3>Utilizadores Existentes</h3>
     <div class="user-filtros">
-      <input id="user-busca" placeholder="🔍 Pesquisar por nome ou email..." oninput="filtrarUtilizadores()">
+      <input id="user-busca" placeholder="🔍 Pesquisar por nome ou email..." oninput="_debRender('users')">
       <select id="user-filtro-role" onchange="filtrarUtilizadores()">
         <option value="">Todas as funções</option>
         <option value="admin">Admin</option>
@@ -1450,6 +1452,16 @@ let _syncing = false; window._syncing = false;   // Flag para evitar loops em re
 // ── UI Helpers ─────────────────────────────────────────────
 function showLoading(){ document.getElementById('loading-overlay').classList.remove('hidden'); }
 function hideLoading(){ document.getElementById('loading-overlay').classList.add('hidden'); }
+// Debounce de re-render para pesquisas (evita reconstruir a tabela a cada tecla)
+window._debTimers = {};
+function _debRender(which){
+  clearTimeout(window._debTimers[which]);
+  window._debTimers[which] = setTimeout(function(){
+    if(which==='tab' && window.renderTab) renderTab();
+    else if(which==='exec' && window.renderExec) renderExec();
+    else if(which==='users' && window.filtrarUtilizadores) filtrarUtilizadores();
+  }, 180);
+}
 function showToast(msg, isErr){
   const t = document.getElementById('cloud-toast');
   if(!t) return;
@@ -1596,10 +1608,17 @@ async function fetchAllDataFromDB(){
       else if(c.chave==='chart_prefs'&&v&&typeof _chartPrefs!=='undefined'){_chartPrefs=v;localStorage.setItem('cob_chart_prefs',JSON.stringify(v));}
     });
   }catch(e){}
+  // Restrição por país para utilizadores não-admin com países atribuídos
+  // (filtragem do lado do cliente — não substitui RLS no Supabase)
+  const _restringePais = (_userRole !== 'admin' && _userPaises && _userPaises.length > 0);
   // Obras (não arquivadas)
-  const { data: obrasDB } = await sb.from('obras').select('*').eq('arquivada', false);
+  let _qObras = sb.from('obras').select('*').eq('arquivada', false);
+  let _qArq   = sb.from('obras').select('*').eq('arquivada', true);
+  if(_restringePais){ _qObras = _qObras.in('pais', _userPaises); _qArq = _qArq.in('pais', _userPaises); }
+  const { data: obrasDB, error: _obErr } = await _qObras;
   // Obras arquivadas
-  const { data: arqDB } = await sb.from('obras').select('*').eq('arquivada', true);
+  const { data: arqDB, error: _arErr } = await _qArq;
+  if(_obErr || _arErr){ console.error('Erro a carregar obras:', _obErr||_arErr); showToast('Erro a carregar obras: ' + ((_obErr||_arErr).message), true); }
   // Execuções de todas as obras visíveis
   const allIds = [...(obrasDB || []), ...(arqDB || [])].map(o => o.id);
   let execMap = {};
@@ -1637,8 +1656,11 @@ async function fetchAllDataFromDB(){
   if(typeof _snapshotObras==="function")_snapshotObras();
   // Carregar propostas da Orçamentação
   try{
-    const { data: propDB } = await sb.from('propostas').select('*').eq('arquivada', false).order('data_rececao', {ascending:false});
-    const { data: propArqDB } = await sb.from('propostas').select('*').eq('arquivada', true).order('data_rececao', {ascending:false});
+    let _qProp = sb.from('propostas').select('*').eq('arquivada', false).order('data_rececao', {ascending:false});
+    let _qPropArq = sb.from('propostas').select('*').eq('arquivada', true).order('data_rececao', {ascending:false});
+    if(_restringePais){ _qProp = _qProp.in('pais', _userPaises); _qPropArq = _qPropArq.in('pais', _userPaises); }
+    const { data: propDB } = await _qProp;
+    const { data: propArqDB } = await _qPropArq;
     if(propDB){
       // Expor dados para o módulo ORC carregar
       window._orcPropostasDB = propDB;
@@ -1702,18 +1724,26 @@ async function syncObraToDB(obra, quiet){
   };
   if(window._syncStart) window._syncStart();
   const { error } = await sb.from('obras').upsert(payload, { onConflict: 'id' });
-  if(window._syncEnd) window._syncEnd(!!error);
-  if(error){ showToast('Erro a guardar: ' + error.message, true); console.error(error); }
-  else { if(!quiet) showToast('✓ Guardado'); }
-  // Sincronizar execucoes
+  if(error){
+    if(window._syncEnd) window._syncEnd(true);
+    showToast('Erro a guardar: ' + error.message, true); console.error(error);
+    window._localWriteAt = Date.now();
+    return;
+  }
+  // Sincronizar execucoes (só confirma "Guardado" depois de ambas as escritas)
+  let execErr = null;
   if(obra.execucoes && obra.execucoes.length){
     const execPayload = obra.execucoes.map(e => ({
       obra_id: obra.id, mes: e.mes, percentagem: e.percentagem,
       trabalhos_mais_mes: e.trabalhos_mais_mes || 0, observacoes: e.observacoes || null,
       criado_por: _user ? _user.id : null
     }));
-    await sb.from('execucoes').upsert(execPayload, { onConflict: 'obra_id,mes' });
+    ({ error: execErr } = await sb.from('execucoes').upsert(execPayload, { onConflict: 'obra_id,mes' }));
   }
+  if(window._syncEnd) window._syncEnd(!!execErr);
+  if(execErr){ showToast('Erro a guardar execuções: ' + execErr.message, true); console.error(execErr); }
+  else { if(!quiet) showToast('✓ Guardado'); }
+  window._localWriteAt = Date.now();
 }
 
 async function syncDeleteObraFromDB(obraId){
@@ -1752,18 +1782,40 @@ async function syncPaisesToDB(){
   if(_syncing) return;
   const rows = paisesConfig.map((p, idx) => ({ nome: p.nome, cor: p.cor, ordem: idx }));
   if(rows.length){
-    await sb.from('paises').upsert(rows, { onConflict: 'nome' });
+    const { error: upErr } = await sb.from('paises').upsert(rows, { onConflict: 'nome' });
+    if(upErr){ showToast('Erro a guardar países: ' + upErr.message, true); console.error(upErr); return; }
   }
+  // Remover linhas órfãs (países eliminados da configuração)
+  const { data: existentes } = await sb.from('paises').select('nome');
+  if(existentes){
+    const manter = new Set(paisesConfig.map(p => p.nome));
+    const remover = existentes.map(r => r.nome).filter(n => !manter.has(n));
+    if(remover.length){
+      const { error: delErr } = await sb.from('paises').delete().in('nome', remover);
+      if(delErr) console.error('paises delete órfãos:', delErr);
+    }
+  }
+  window._localWriteAt = Date.now();
 }
 
 async function syncLocalidadesToDB(){
   if(_syncing) return;
-  // Apagar todas + reinserir (mais simples que diff)
-  // Mantemos via upsert por (nome, pais)
   const rows = localidadesConfig.map(l => ({ nome: l.nome, pais: l.pais, cor: l.cor || null }));
   if(rows.length){
-    await sb.from('localidades').upsert(rows, { onConflict: 'nome,pais' });
+    const { error: upErr } = await sb.from('localidades').upsert(rows, { onConflict: 'nome,pais' });
+    if(upErr){ showToast('Erro a guardar localidades: ' + upErr.message, true); console.error(upErr); return; }
   }
+  // Remover localidades que já não existem na configuração (chave composta nome+pais)
+  const { data: existentes } = await sb.from('localidades').select('nome,pais');
+  if(existentes){
+    const manter = new Set(localidadesConfig.map(l => l.nome + '|' + l.pais));
+    const remover = existentes.filter(r => !manter.has(r.nome + '|' + r.pais));
+    for(const r of remover){
+      const { error: delErr } = await sb.from('localidades').delete().eq('nome', r.nome).eq('pais', r.pais);
+      if(delErr) console.error('localidades delete órfã:', delErr);
+    }
+  }
+  window._localWriteAt = Date.now();
 }
 
 async function logHistorico(obraId, tipo, campo, antes, depois){
@@ -1799,21 +1851,40 @@ window.addEventListener("beforeunload", function(e){
   }
 });
 
+// Ignora os ecos das gravações do próprio utilizador (que de outra forma
+// disparavam um refetch completo e destruíam edições em curso noutra linha).
+function _isOwnRealtimeEcho(payload){
+  const meId = window._user ? window._user.id : null;
+  const row = (payload && (payload.new || payload.old)) || {};
+  if(meId && row.atualizado_por === meId) return true;          // eco da própria gravação
+  if(Date.now() - (window._localWriteAt || 0) < 2000) return true; // janela de segurança
+  return false;
+}
 function setupRealtime(){
   sb.channel('obras-changes')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'obras' }, (payload) => {
       // Quando outro user altera, recarregar
-      if(_syncing) return;
+      if(_syncing || _isOwnRealtimeEcho(payload)) return;
       console.log('Realtime change detected, refreshing...');
       refreshFromDB();
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'propostas' }, (payload) => {
       // Alterações às propostas por outro utilizador
-      if(_syncing) return;
+      if(_syncing || _isOwnRealtimeEcho(payload)) return;
       console.log('Realtime change (propostas), refreshing...');
       refreshFromDB();
     })
-    .subscribe();
+    .subscribe((status) => {
+      // Feedback de estado da ligação realtime
+      const ind = document.getElementById('sync-indicator');
+      if(status === 'SUBSCRIBED'){
+        window._realtimeOk = true;
+      } else if(status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED'){
+        if(window._realtimeOk){ showToast('⚠ Ligação em tempo real perdida — as alterações de outros utilizadores podem não aparecer até recarregar.', true); }
+        window._realtimeOk = false;
+        if(ind){ ind.title = 'Tempo real desligado'; }
+      }
+    });
 }
 
 let _refreshTimer = null;
@@ -1896,9 +1967,9 @@ function filtrarUtilizadores(){
     var estTxt = p._activo ? "Activo" : "Inactivo";
     return '<div class="user-card'+(p._activo?"":" user-inactivo")+'">'+
       '<div class="ucol"><div class="lbl">Nome</div>'+
-        '<div class="val">'+(p.nome||'—')+(isMe?' <span style="color:var(--ac);font-size:10px">(eu)</span>':'')+
+        '<div class="val">'+_esc(p.nome||'—')+(isMe?' <span style="color:var(--ac);font-size:10px">(eu)</span>':'')+
         ' <button class="ent-btn" style="width:24px;height:22px;font-size:11px" onclick="editarNomeUtilizador(\''+p.id+'\')" title="Editar nome">✎</button></div></div>'+
-      '<div class="ucol"><div class="lbl">Email</div><div class="val" style="font-family:\'DM Mono\',monospace;font-size:11px">'+p.email+'</div></div>'+
+      '<div class="ucol"><div class="lbl">Email</div><div class="val" style="font-family:\'DM Mono\',monospace;font-size:11px">'+_esc(p.email)+'</div></div>'+
       '<div class="ucol"><div class="lbl">Função</div>'+
         '<select onchange="atualizarRole(\''+p.id+'\',this.value)" '+(isMe?'disabled':'')+' style="background:var(--sf);border:1px solid var(--bd);color:var(--tx);padding:4px 8px;border-radius:5px;font-size:12px">'+
           '<option value="viewer" '+(p.role==='viewer'?'selected':'')+'>Viewer</option>'+
@@ -1925,20 +1996,23 @@ async function editarNomeUtilizador(userId){
   novo = novo.trim();
   if(!novo){ alert("O nome não pode ficar vazio."); return; }
   try{
-    await sb.from('perfis').update({nome:novo}).eq('id', userId);
+    const { error } = await sb.from('perfis').update({nome:novo}).eq('id', userId);
+    if(error){ alert("Erro: "+error.message); return; }
     p.nome = novo;
     filtrarUtilizadores();
     showToast("✓ Nome actualizado");
   }catch(e){ alert("Erro: "+e.message); }
 }
 
-// activar / inactivar (localStorage por agora)
-function toggleEstadoUtilizador(userId){
+// activar / inactivar — persiste no Supabase (coluna 'activo') com fallback a localStorage
+async function toggleEstadoUtilizador(userId){
   var p = _adminPerfis.find(function(x){return x.id===userId;});
   if(!p) return;
   if(p.id===_user.id){ alert("Não te podes inactivar a ti próprio."); return; }
   p._activo = !p._activo;
-  _userEstadoGravar(p.email, p._activo);
+  _userEstadoGravar(p.email, p._activo);   // cache local imediata
+  // Tentar gravar no Supabase como fonte de verdade partilhada (se a coluna existir)
+  try{ await sb.from('perfis').update({ activo: p._activo }).eq('id', userId); }catch(e){ /* coluna 'activo' pode não existir ainda — fica só em localStorage */ }
   filtrarUtilizadores();
   showToast(p._activo?"✓ Utilizador activado":"Utilizador inactivado");
 }
@@ -1948,12 +2022,13 @@ async function renderAdminPanel(){
   const chipBox = document.getElementById('adm-paises');
   if(chipBox){
     chipBox.innerHTML = paisesConfig.map(p =>
-      `<span class="pais-chip" data-pais="${p.nome}" onclick="this.classList.toggle('act')">${p.nome}</span>`
+      `<span class="pais-chip" data-pais="${_esc(p.nome)}" onclick="this.classList.toggle('act')">${_esc(p.nome)}</span>`
     ).join('');
   }
   // Listar utilizadores
-  const { data: perfis } = await sb.from('perfis').select('*').order('criado_em');
+  const { data: perfis, error: perfisErr } = await sb.from('perfis').select('*').order('criado_em');
   const { data: ups } = await sb.from('utilizadores_paises').select('*');
+  if(perfisErr){ showToast('Erro a carregar utilizadores: ' + perfisErr.message, true); console.error(perfisErr); return; }
   const paisesPorUser = {};
   (ups || []).forEach(u => {
     if(!paisesPorUser[u.user_id]) paisesPorUser[u.user_id] = [];
@@ -1981,12 +2056,16 @@ async function renderAdminPanel(){
         const { data: usrs } = await sb.from('perfis').select('id,email').in('id', userIds);
         (usrs || []).forEach(u => { nomes[u.id] = u.email; });
       }
+      // Mapa obra_id -> designação (obras activas + arquivadas) para mostrar nomes legíveis
+      const _obraNome = {};
+      [...(typeof obras!=='undefined'?obras:[]), ...(typeof arquivadas!=='undefined'?arquivadas:[])].forEach(o=>{ if(o&&o.id) _obraNome[o.id]=o.designacao||o.codigo||o.id; });
       histEl.innerHTML = '<table class="resizable-table" style="width:100%"><thead><tr><th>Data</th><th>Utilizador</th><th>Acção</th><th>Obra</th><th>Detalhe</th></tr></thead><tbody>' +
         hist.map(h => {
           const dt = new Date(h.data);
           const dtStr = dt.toLocaleDateString('pt-PT') + ' ' + dt.toLocaleTimeString('pt-PT',{hour:'2-digit',minute:'2-digit'});
-          const det = h.campo ? `${h.campo}: ${h.valor_antes||'—'} → ${h.valor_depois||'—'}` : '';
-          return `<tr><td style="font-family:'DM Mono',monospace;font-size:11px">${dtStr}</td><td style="font-size:11px">${nomes[h.user_id]||'—'}</td><td>${h.tipo_acao}</td><td style="font-family:'DM Mono',monospace;font-size:11px">${h.obra_id||'—'}</td><td style="font-size:11px;color:var(--tx2)">${det}</td></tr>`;
+          const det = h.campo ? `${_esc(h.campo)}: ${_esc(h.valor_antes||'—')} → ${_esc(h.valor_depois||'—')}` : '';
+          const obraLbl = h.obra_id ? (_obraNome[h.obra_id] || h.obra_id) : '—';
+          return `<tr><td style="font-family:'DM Mono',monospace;font-size:11px">${dtStr}</td><td style="font-size:11px">${_esc(nomes[h.user_id]||'—')}</td><td>${_esc(h.tipo_acao)}</td><td style="font-size:11px" title="${_esc(h.obra_id||'')}">${_esc(obraLbl)}</td><td style="font-size:11px;color:var(--tx2)">${det}</td></tr>`;
         }).join('') + '</tbody></table>';
     }
   }
@@ -2009,11 +2088,20 @@ async function criarUtilizador(){
     if(adminSession){
       await sb.auth.setSession({ access_token: adminSession.access_token, refresh_token: adminSession.refresh_token });
     }
-    // Aguardar trigger criar perfil
-    await new Promise(r=>setTimeout(r,800));
+    // Aguardar (poll) que o trigger crie o perfil — mais fiável que um tempo fixo
+    let perfilOk = false;
+    if(data.user){
+      for(let tentativa=0; tentativa<12 && !perfilOk; tentativa++){
+        const { data: pf } = await sb.from('perfis').select('id').eq('id', data.user.id).maybeSingle();
+        if(pf){ perfilOk = true; break; }
+        await new Promise(r=>setTimeout(r,400));
+      }
+    }
     // Atualizar role
     if(data.user){
-      await sb.from('perfis').update({ role, nome: nome || email.split('@')[0] }).eq('id', data.user.id);
+      if(!perfilOk){ throw new Error('O perfil não foi criado a tempo (verifique o trigger handle_new_user no Supabase).'); }
+      const { error: upErr } = await sb.from('perfis').update({ role, nome: nome || email.split('@')[0] }).eq('id', data.user.id);
+      if(upErr) throw upErr;
       // Atribuir países seleccionados
       const chips = document.querySelectorAll('#adm-paises .pais-chip.act');
       const paisesSel = [...chips].map(c => c.dataset.pais);
@@ -2059,20 +2147,22 @@ async function atualizarRole(userId, novoRole){
 async function togglePaisUser(userId, pais, el){
   el.classList.toggle('act');
   const acti = el.classList.contains('act');
+  let error;
   if(acti){
-    await sb.from('utilizadores_paises').upsert({ user_id: userId, pais }, { onConflict: 'user_id,pais' });
-    showToast('✓ Adicionado: ' + pais);
+    ({ error } = await sb.from('utilizadores_paises').upsert({ user_id: userId, pais }, { onConflict: 'user_id,pais' }));
   } else {
-    await sb.from('utilizadores_paises').delete().eq('user_id', userId).eq('pais', pais);
-    showToast('✓ Removido: ' + pais);
+    ({ error } = await sb.from('utilizadores_paises').delete().eq('user_id', userId).eq('pais', pais));
   }
+  if(error){ el.classList.toggle('act'); alert('Erro: ' + error.message); return; } // reverter UI
+  showToast((acti?'✓ Adicionado: ':'✓ Removido: ') + pais);
 }
 
 async function removerUtilizador(userId, email){
   if(!confirm('Remover utilizador ' + email + '?\nEsta acção é IRREVERSÍVEL.\n\nNota: a conta de autenticação só pode ser totalmente removida no painel Supabase.')) return;
   // Remove o perfil e atribuições (a conta auth.users continua até ser apagada manualmente no Supabase)
-  await sb.from('utilizadores_paises').delete().eq('user_id', userId);
-  await sb.from('perfis').delete().eq('id', userId);
+  const { error: e1 } = await sb.from('utilizadores_paises').delete().eq('user_id', userId);
+  const { error: e2 } = await sb.from('perfis').delete().eq('id', userId);
+  if(e1 || e2){ alert('Erro a remover: ' + ((e1||e2).message)); return; }
   showToast('✓ Removido (apaga também em Auth no painel Supabase)');
   renderAdminPanel();
 }
@@ -2097,7 +2187,7 @@ function markObraDirty(id){
 // Aqui substituímos por: verificar sessão -> se ok, postLoginSetup -> senão mostrar login
 
 // ═══ VERSÃO DO FICHEIRO — atualizar aqui a cada alteração ═══
-const APP_VERSAO="v43 · 08/06/2026";
+const APP_VERSAO="v44 · 12/06/2026";
 // Auto-bump: call bumpVersao() whenever a change is saved to the document
 function bumpVersao(){
   const el=document.getElementById('hd-versao');
@@ -2552,7 +2642,7 @@ function renderSumPais(container,lista){
   el.innerHTML=Object.entries(s).sort((a,b)=>b[1].vt-a[1].vt).map(([p,d])=>{
     const cor=getPaisCor(p);
     return`<div class="pais-sum-card" style="border-left-color:${cor}">
-      <h4 style="color:${cor}">${p} <span style="color:var(--tx3);font-weight:400">(${d.n} obras)</span></h4>
+      <h4 style="color:${cor}">${_esc(p)} <span style="color:var(--tx3);font-weight:400">(${d.n} obras)</span></h4>
       <div class="ps-vals">
         <div><div class="ps-v">Contratual</div><div class="ps-n" style="color:var(--tx)">${fE(d.vt)}</div></div>
         <div><div class="ps-v">Executado</div><div class="ps-n" style="color:var(--ac2)">${fE(d.ve)}</div></div>
@@ -2573,7 +2663,8 @@ function aplicarEstadoAutomatico(o){
   if(pct>=100){novoEstado="Concluído";}
   else if(pct>0){novoEstado="Em Curso";}
   else {novoEstado="Adjudicado";}
-  // Suspenso entra na automação na mesma (definido pelo utilizador)
+  // Respeitar "Suspenso" definido manualmente: só sai de Suspenso quando atinge 100% (Concluído)
+  if(o.estado==="Suspenso" && novoEstado!=="Concluído") return;
   if(o.estado!==novoEstado){
     o.estado=novoEstado;
   }
@@ -2680,7 +2771,7 @@ function renderDimSummaryScope(scope){
     const k=o[dim]||"— Não definido —";
     if(!agrup[k])agrup[k]={n:0,vt:0,ve:0,vpe:0,exec_acc:0,exec_n:0};
     const c=calcObra(o);
-    agrup[k].n++;agrup[k].vt+=(o.valor||0);agrup[k].ve+=c.ve;
+    agrup[k].n++;agrup[k].vt+=c.vt;agrup[k].ve+=c.ve;  // vt = valor + trabalhos a mais (consistente com calcSumPais)
     // Carteira Efectiva: apenas GII não concluídas
     if(o.grupo==="II"&&o.estado!=="Concluído"){agrup[k].vpe+=c.vpe;}
     if(o.grupo==="II"&&c.pct>0){agrup[k].exec_acc+=c.pct;agrup[k].exec_n++;}
@@ -2693,7 +2784,7 @@ function renderDimSummaryScope(scope){
     const cor=dim==="pais"?(corPaises[nome]||palette[idx%palette.length]):palette[idx%palette.length];
     const execMed=d.exec_n?(d.exec_acc/d.exec_n).toFixed(1)+"%":"—";
     return `<div class="pais-sum-card" style="border-left:3px solid ${cor}">
-      <div style="font-size:11px;color:var(--tx3);text-transform:uppercase;letter-spacing:.5px;font-family:'DM Mono',monospace;margin-bottom:6px">${nome}</div>
+      <div style="font-size:11px;color:var(--tx3);text-transform:uppercase;letter-spacing:.5px;font-family:'DM Mono',monospace;margin-bottom:6px">${_esc(nome)}</div>
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
         <span style="font-family:'DM Mono',monospace;font-size:15px;font-weight:700;color:var(--tx)">${fE(d.vt)}</span>
         <span style="font-size:11px;color:var(--tx3)">${d.n} obra${d.n!==1?'s':''}</span>
@@ -2712,7 +2803,7 @@ function atualizarGraficoDim(){
   if(!cv||!charts.p)return;
   const dim=_dimEstado.global||"pais";
   const agrup={};
-  obras.forEach(o=>{const k=o[dim]||"— Não definido —";agrup[k]=(agrup[k]||0)+(o.valor||0);});
+  obras.forEach(o=>{const k=o[dim]||"— Não definido —";agrup[k]=(agrup[k]||0)+calcObra(o).vt;});
   const labels=Object.keys(agrup);const data=Object.values(agrup);
   const palette=["#4f8ef7","#38d9a9","#f5a623","#c084fc","#e05c5c","#3ec9d6","#f5d442","#8892aa"];
   const corPaises={};(typeof paisesConfig!=="undefined"?paisesConfig:[]).forEach(p=>{corPaises[p.nome]=p.cor;});
@@ -2946,7 +3037,7 @@ function renderCustomChartsList(){
   const perNomes={mensal12:"Mensal 12m",mensal24:"Mensal 24m",mensal36:"Mensal 36m",anual3:"Anual 3a",anual5:"Anual 5a"};
   cont.innerHTML='<div class="tw"><table><thead><tr><th>Título</th><th>Medida</th><th>Agrupar / Período</th><th>País</th><th>Tipo</th><th>Dashboard</th><th></th></tr></thead><tbody>'+
     _customCharts.map(c=>`<tr>
-      <td class="tdm">${c.titulo}</td><td>${medNomes[c.medida]||c.medida}</td><td>${c.periodo?perNomes[c.periodo]:c.grupo}</td><td>${c.pais||"Todos"}</td><td>${c.tipo}</td><td>${dashNomes[c.dash]}</td>
+      <td class="tdm">${_esc(c.titulo)}</td><td>${medNomes[c.medida]||c.medida}</td><td>${c.periodo?perNomes[c.periodo]:c.grupo}</td><td>${_esc(c.pais||"Todos")}</td><td>${_esc(c.tipo)}</td><td>${dashNomes[c.dash]}</td>
       <td><button class="btn bd2 bxs" onclick="eliminarGraficoPersonalizado('${c.id}')">✕</button></td>
     </tr>`).join("")+'</tbody></table></div>';
 }
@@ -3088,6 +3179,7 @@ function _dadosCustom(cfg,pool){
   let labels=Object.keys(grupos);
   if(cfg.grupo==="mes")labels.sort((a,b)=>MESES.indexOf(a)-MESES.indexOf(b));
   else if(cfg.grupo==="escalao")labels.sort((a,b)=>escaloesDef.findIndex(e=>e.l===a)-escaloesDef.findIndex(e=>e.l===b));
+  else if(cfg.grupo==="mesano")labels.sort((a,b)=>{const[ma,ya]=a.split('/');const[mb,yb]=b.split('/');return (ya-yb)||(MESES.indexOf(ma)-MESES.indexOf(mb));});
   else labels.sort();
   const vals=labels.map(l=>_valDe(grupos[l],cfg.medida));
   // 2ª série (sobreposição), se definida
@@ -3163,7 +3255,7 @@ function renderCustomCharts(dash){
       wrap=document.createElement("div");
       wrap.className="cgrid";
       wrap.id="ccwrap-"+cfg.id;
-      wrap.innerHTML=`<div class="cc"><h3>${cfg.titulo}${subt} <span style="font-size:10px;color:var(--ac2)">• personalizado</span></h3><div class="cw"><canvas id="canvas-${cfg.id}"></canvas></div></div>`;
+      wrap.innerHTML=`<div class="cc"><h3>${_esc(cfg.titulo)}${subt} <span style="font-size:10px;color:var(--ac2)">• personalizado</span></h3><div class="cw"><canvas id="canvas-${cfg.id}"></canvas></div></div>`;
       panel.appendChild(wrap);
     }
     const {labels,vals,vals2}=_dadosCustom(cfg,pool);
@@ -3445,6 +3537,7 @@ function entEditar(tipo, id){
   if(novoNome===null) return;
   novoNome = novoNome.trim();
   if(!novoNome){ alert("O nome não pode ficar vazio."); return; }
+  if(entDados[tipo].some(function(x){return x.id!==id && (x.nome||"").toLowerCase()===novoNome.toLowerCase();})){ alert("Já existe um registo com esse nome."); return; }
   var novoCod = prompt("Código:", e.codigo||"");
   if(novoCod===null) return;
   var novaObs = prompt("Observações:", e.observacoes||"");
@@ -3540,7 +3633,7 @@ function fillFiltPais(){
   const selE=document.getElementById("ep");
   const v=sel.value,vE=selE.value;
   [sel,selE].forEach(s=>{
-    s.innerHTML='<option value="">Todos</option>'+paisesConfig.map(p=>`<option>${p.nome}</option>`).join("");
+    s.innerHTML='<option value="">Todos</option>'+paisesConfig.map(p=>`<option>${_esc(p.nome)}</option>`).join("");
   });
   sel.value=v;selE.value=vE;
 }
@@ -3551,7 +3644,7 @@ function fillFiltEstado(){
 function fillFormPais(){
   const sel=document.getElementById("fcp");
   const v=sel.value;
-  sel.innerHTML='<option value="">— Seleccionar —</option>'+paisesConfig.map(p=>`<option>${p.nome}</option>`).join("");
+  sel.innerHTML='<option value="">— Seleccionar —</option>'+paisesConfig.map(p=>`<option>${_esc(p.nome)}</option>`).join("");
   sel.value=v;
   fillLocs();
 }
@@ -3559,7 +3652,7 @@ function fillFormLocs(){
   const sel=document.getElementById("floc");
   if(!sel)return;
   const v=sel.value;
-  sel.innerHTML='<option value="">— Seleccionar —</option>'+localidadesConfig.map(l=>`<option>${l.nome}</option>`).join("");
+  sel.innerHTML='<option value="">— Seleccionar —</option>'+localidadesConfig.map(l=>`<option>${_esc(l.nome)}</option>`).join("");
   if(v)sel.value=v;
 }
 
@@ -3615,7 +3708,7 @@ function renderTipoLista(tipo){
     arr.map(t=>{
       const n=[...obras,...arquivadas].filter(o=>o[campo]===t).length;
       return`<tr>
-        <td class="tdm">${t}</td>
+        <td class="tdm">${_esc(t)}</td>
         <td class="tdv">${n}</td>
         <td><button class="btn bd2 bxs" onclick="delTipo('${tipo}','${t.replace(/'/g,"\\'")}')">✕</button></td>
       </tr>`;
@@ -3634,13 +3727,13 @@ function fillLocs(){
   const sel=document.getElementById("floc");
   const v=sel.value;
   const locs=pais?localidadesConfig.filter(l=>l.pais===pais):localidadesConfig;
-  sel.innerHTML='<option value="">— Seleccionar —</option>'+locs.map(l=>`<option>${l.nome}</option>`).join("");
+  sel.innerHTML='<option value="">— Seleccionar —</option>'+locs.map(l=>`<option>${_esc(l.nome)}</option>`).join("");
   sel.value=v;
 }
 function fillDefPais(){
   const sel=document.getElementById("l-pais");
   const v=sel.value;
-  sel.innerHTML='<option value="">— Seleccionar —</option>'+paisesConfig.map(p=>`<option>${p.nome}</option>`).join("");
+  sel.innerHTML='<option value="">— Seleccionar —</option>'+paisesConfig.map(p=>`<option>${_esc(p.nome)}</option>`).join("");
   sel.value=v;
 }
 function onGrupoChange(){
@@ -3731,9 +3824,10 @@ function salvarPais(){
 }
 function editPais(i){
   const p=paisesConfig[i];
-  const nome=prompt("Nome do País:",p.nome);
+  const nome=(prompt("Nome do País:",p.nome)||"").trim();
   if(!nome)return;
-  p.nome=nome.trim();
+  if(paisesConfig.some((x,j)=>j!==i && (x.nome||"").toLowerCase()===nome.toLowerCase())){ alert("País já existe."); return; }
+  p.nome=nome;
   salvarPaises();fillFiltPais();fillFormPais();fillDefPais();renderPaises();
 }
 function delPais(i){
@@ -3748,7 +3842,7 @@ function renderPaises(){
   cont.innerHTML=paisesConfig.map((p,i)=>`
     <div class="config-item">
       <div class="ci-color" style="background:${p.cor}"></div>
-      <div class="ci-name">${p.nome}</div>
+      <div class="ci-name">${_esc(p.nome)}</div>
       <div style="display:flex;gap:6px">
         <button class="btn bg2 bxs" onclick="editPais(${i})">✎</button>
         <button class="btn bd2 bxs" onclick="delPais(${i})">✕</button>
@@ -3777,7 +3871,7 @@ function renderLocalidades(){
   if(!localidadesConfig.length){cont.innerHTML='<div class="empty"><p>Nenhuma localidade configurada.</p></div>';return;}
   cont.innerHTML=`<div class="tw"><table><thead><tr><th>Localidade</th><th>País</th><th></th></tr></thead><tbody>`+
     localidadesConfig.sort((a,b)=>a.pais.localeCompare(b.pais,"pt")||a.nome.localeCompare(b.nome,"pt")).map((l,i)=>`
-    <tr><td class="tdm">${l.nome}</td><td>${badgeHtml(l.pais)}</td>
+    <tr><td class="tdm">${_esc(l.nome)}</td><td>${badgeHtml(l.pais)}</td>
     <td><button class="btn bd2 bxs" onclick="delLoc(${i})">✕</button></td></tr>`).join("")+
     `</tbody></table></div>`;
 }
@@ -4010,8 +4104,9 @@ function renderDashGlobal(){
     <div class="kpi gr"><div class="kl">Estados</div><div class="kv">${scopeConcluidas} ✅</div><div class="ks">${scopeEmCurso} em curso · ${scopeSuspensas} suspensos</div></div>`;
   renderSumPais("pais-sum-global",obras);
   const cors={};paisesConfig.forEach(p=>{cors[p.nome]=p.cor;});
+  const _palPais=["#4f8ef7","#38d9a9","#f5a623","#c084fc","#e05c5c","#3ec9d6","#f5d442","#8892aa","#ff8fab","#7dd3fc","#a3e635","#fb923c"];
   const pp={};obrasVal.forEach(o=>{pp[o.pais]=(pp[o.pais]||0)+valorDe(o);});
-  charts.p=mkChart("ch-pais","doughnut",{labels:Object.keys(pp),datasets:[{data:Object.values(pp),backgroundColor:Object.keys(pp).map(p=>cors[p]||"#8892aa"),borderWidth:2,borderColor:"#181c27"}]},{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:"right",labels:{pointStyle:"rect",boxWidth:10,boxHeight:10,color:"#4a5568",font:{family:"DM Mono",size:11}}},tooltip:{callbacks:{label:c=>c.label+": "+fE(c.raw)}}}});
+  charts.p=mkChart("ch-pais","doughnut",{labels:Object.keys(pp),datasets:[{data:Object.values(pp),backgroundColor:Object.keys(pp).map((p,i)=>cors[p]||_palPais[i%_palPais.length]),borderWidth:2,borderColor:"#181c27"}]},{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:"right",labels:{pointStyle:"rect",boxWidth:10,boxHeight:10,color:"#4a5568",font:{family:"DM Mono",size:11}}},tooltip:{callbacks:{label:c=>c.label+": "+fE(c.raw)}}}});
   charts.e=mkChart("ch-estado","bar",{labels:["Grupo I","Grupo II"],datasets:[{data:[vgi,vgii],backgroundColor:["#f5a623","#38d9a9"],borderRadius:6}]},{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>fE(c.raw)}}},scales:{y:{beginAtZero:true,ticks:{color:"#6b7280",callback:v=>fE(v)},grid:{color:"#e2e6ef"}},x:{ticks:{color:"#4a5568"},grid:{display:false}}}});
   const pl={};obrasVal.forEach(o=>{if(o.localidade)pl[o.localidade]=(pl[o.localidade]||0)+valorDe(o);});
   const tl=Object.entries(pl).sort((a,b)=>b[1]-a[1]).slice(0,12);
@@ -4130,7 +4225,7 @@ function renderDashGI(){
       const cor=cors[p]||"#8892aa";
       const n=gi.filter(o=>o.pais===p).length;
       return`<div class="pais-sum-card" style="border-left-color:${cor}">
-        <h4 style="color:${cor}">${p} <span style="color:var(--tx3);font-weight:400">(${n} proposta${n!==1?"s":""})</span></h4>
+        <h4 style="color:${cor}">${_esc(p)} <span style="color:var(--tx3);font-weight:400">(${n} proposta${n!==1?"s":""})</span></h4>
         <div class="ps-vals">
           <div><div class="ps-v">Valor Propostas</div><div class="ps-n" style="color:var(--tx)">${fE(vt)}</div></div>
         </div>
@@ -4194,9 +4289,18 @@ function salvarTipos(){
   if(window.syncTiposToDB)syncTiposToDB();
 }
 
+// Parser numérico pt-PT robusto: aceita "1.234,56", "1234,56", "1234.56", "1234"
+function _numPT(val){
+  if(val==null) return 0;
+  var s=String(val).trim().replace(/\s/g,'');
+  if(!s) return 0;
+  if(s.indexOf(',')>=0){ s=s.replace(/\./g,'').replace(',','.'); } // vírgula = decimal; ponto = milhares
+  var n=parseFloat(s);
+  return isNaN(n)?0:n;
+}
 function updArea(id,val){
   const o=obras.find(x=>x.id===id)||arquivadas.find(x=>x.id===id);if(!o)return;
-  const num=parseFloat((val||"").replace(",","."));
+  const num=_numPT(val);
   o.area=isNaN(num)?0:num;
   if(window.markObraDirty)markObraDirty(id);
   salvar();renderDash();
@@ -4322,7 +4426,7 @@ function renderGrupoTabela(lista,grupo){
         ${TIPOS_CLIENTE.map(t=>`<option value="${t}" ${o.tipo_cliente===t?'selected':''}>${t}</option>`).join('')}
       </select>`;
 
-      const label=`${concluida?'✅ ':''}${suspensa?'⏸ ':''}${o.designacao}`;
+      const label=`${concluida?'✅ ':''}${suspensa?'⏸ ':''}${_esc(o.designacao)}`;
 
       if(grupo==='I'){
         // GI: 13 colunas (sem Código)
@@ -4338,9 +4442,9 @@ function renderGrupoTabela(lista,grupo){
       obraRows+=`<tr data-pais="${pais}" data-oid="${o.id}" class="${rowClass}" draggable="true" ondragstart="obraDragStart(event,'${o.id}')" ondragover="obraDragOver(event)" ondrop="obraDrop(event,'${o.id}')" ondragend="obraDragEnd(event)">
           <td>${tiSpan}</td>
           <td>${tObraSpan}</td>
-          <td class="td-des" title="${o.designacao}">${label}</td>
+          <td class="td-des" title="${_esc(o.designacao)}">${label}</td>
           <td>${badgeHtml(o.pais)}</td>
-          <td title="${o.dono||''}">${o.dono||'—'}</td>
+          <td title="${_esc(o.dono||'')}">${_esc(o.dono||'—')}</td>
           <td>${tCliSpan}</td>
           <td>${selGrupo}</td>
           <td><input class="area-input-inline" type="text" inputmode="numeric" value="${o.area?o.area:''}" placeholder="—"
@@ -4382,9 +4486,9 @@ function renderGrupoTabela(lista,grupo){
           <td>${codInp}</td>
           <td>${tiSpan}</td>
           <td>${tObraSpan}</td>
-          <td class="td-des" title="${o.designacao}">${label}</td>
+          <td class="td-des" title="${_esc(o.designacao)}">${label}</td>
           <td>${badgeHtml(o.pais)}</td>
-          <td title="${o.dono||''}">${o.dono||'—'}</td>
+          <td title="${_esc(o.dono||'')}">${_esc(o.dono||'—')}</td>
           <td>${tCliSpan}</td>
           <td>${selGrupo}</td>
           <td><input class="area-input-inline" type="text" inputmode="numeric" value="${o.area?o.area:''}" placeholder="—"
@@ -4470,7 +4574,7 @@ function renderTab(){
     if(fp&&o.pais!==fp)return false;
     if(fg&&o.grupo!==fg)return false;
     if(festf&&o.estado!==festf)return false;
-    if(fs&&!(o.designacao+" "+o.dono+" "+o.localidade+" "+(o.codigo||"")).toLowerCase().includes(fs))return false;
+    if(fs&&!((o.designacao||"")+" "+(o.dono||"")+" "+(o.localidade||"")+" "+(o.codigo||"")).toLowerCase().includes(fs))return false;
     return true;
   }));
   document.getElementById("obras-ct").textContent=f.length+" obra(s)";
@@ -4711,7 +4815,7 @@ function renderArquivadas(){
     </tr></thead><tbody>`+
     arquivadas.map(o=>`<tr id="arc-row-${o.id}" style="${_arcSel[o.id]?'background:rgba(59,111,212,.08)':''}">
       <td style="text-align:center"><input type="checkbox" ${_arcSel[o.id]?'checked':''} onchange="arcToggleSel('${o.id}')"></td>
-      <td class="tdm">${o.designacao}</td>
+      <td class="tdm">${_esc(o.designacao)}</td>
       <td>${badgeHtml(o.pais)}</td>
       <td><span class="arc-badge">G${o.grupo}</span></td>
       <td>${o.estado||"—"}</td>
@@ -4800,9 +4904,9 @@ function renderExec(){
         <div style="display:flex;align-items:flex-start;gap:8px">
           ${o.execucoes.length?`<span id="execobrachev-${o.id}" onclick="toggleExecObra('${o.id}')" style="cursor:pointer;color:var(--tx3);font-size:12px;margin-top:3px" title="Minimizar/expandir histórico">${colapsadoObra?"▸":"▾"}</span>`:""}
           <div>
-          ${o.codigo?`<span class="cod-badge" style="margin-right:6px">${o.codigo}</span>`:""}
-          <strong style="font-size:14px">${concluida?"✅ ":suspensa?"⏸ ":""}${o.designacao}</strong>
-          <div style="font-size:11px;color:var(--tx3);margin-top:3px">${badgeHtml(o.pais)} ${o.localidade} · ${o.dono}</div>
+          ${o.codigo?`<span class="cod-badge" style="margin-right:6px">${_esc(o.codigo)}</span>`:""}
+          <strong style="font-size:14px">${concluida?"✅ ":suspensa?"⏸ ":""}${_esc(o.designacao)}</strong>
+          <div style="font-size:11px;color:var(--tx3);margin-top:3px">${badgeHtml(o.pais)} ${_esc(o.localidade)} · ${_esc(o.dono)}</div>
           </div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -4924,11 +5028,18 @@ function saveExec(){
   if(foiConcluida)setTimeout(()=>alert(`✅ Obra "${o.designacao.substring(0,40)}" marcada como Concluída.`),100);
   if(document.getElementById("panel-detalhe").classList.contains("act"))renderDet(o.id);
 }
+// Apaga a execução também no Supabase (senão o mês reaparece no próximo refresh)
+function _apagarExecucaoDB(id,mes){
+  try{ if(window.sb && window._user){ window.sb.from('execucoes').delete().eq('obra_id',id).eq('mes',mes).then(({error})=>{ if(error) console.error('delete execucao:',error); }); } }catch(e){ console.error(e); }
+}
 function delExec(id,mes){
   if(!confirm(`Eliminar registo de ${mes}?`))return;
   const o=obras.find(x=>x.id===id);
+  if(!o){ showToast('Obra não encontrada.', true); return; }
   o.execucoes=o.execucoes.filter(e=>e.mes!==mes);
+  _apagarExecucaoDB(id,mes);
   salvar();renderExec();
+  showToast(`✓ Registo de ${mes} eliminado`);
 }
 
 // ══════════════════════════════════════════════════════════
@@ -4980,12 +5091,12 @@ function renderDet(id){
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px">
           ${badgeHtml(o.pais)}
           ${o.grupo==="I"?'<span class="badge bgi">I</span>':'<span class="badge bgii">II</span>'}
-          ${o.codigo?`<span class="cod-badge">${o.codigo}</span>`:""}
+          ${o.codigo?`<span class="cod-badge">${_esc(o.codigo)}</span>`:""}
           ${concluida?'<span class="badge" style="background:rgba(56,217,169,.15);color:#38d9a9;border:1px solid rgba(56,217,169,.3)">✅ Concluído</span>':""}
           ${o.estado==="Suspenso"?'<span class="badge" style="background:rgba(245,166,35,.15);color:#f5a623;border:1px solid rgba(245,166,35,.3)">⏸ Suspenso</span>':""}
         </div>
-        <h2>${o.designacao}</h2>
-        <div style="color:var(--tx2);font-size:13px;margin-top:4px">${o.localidade} · ${o.dono}</div>
+        <h2>${_esc(o.designacao)}</h2>
+        <div style="color:var(--tx2);font-size:13px;margin-top:4px">${_esc(o.localidade)} · ${_esc(o.dono)}</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         ${o.grupo==="II"&&!concluida?`<button class="btn bs" onclick="abrirModal('${o.id}')">+ Registo Mensal</button>`:""}
@@ -5019,8 +5130,8 @@ function renderDet(id){
 
     <div class="dgrid">
       <div><table class="itable det-itable">
-        <tr><td>Designação</td><td>${o.designacao}</td></tr>
-        <tr><td>Código</td><td>${o.codigo?`<span class="cod-badge">${o.codigo}</span>`:"—"}</td></tr>
+        <tr><td>Designação</td><td>${_esc(o.designacao)}</td></tr>
+        <tr><td>Código</td><td>${o.codigo?`<span class="cod-badge">${_esc(o.codigo)}</span>`:"—"}</td></tr>
         <tr><td>Estado</td><td>${selEstadoD}</td></tr>
         <tr><td>Grupo</td><td>${selGrupoD}</td></tr>
         <tr><td>Tipo Intervenção</td><td>${selTIntD}</td></tr>
@@ -5028,7 +5139,7 @@ function renderDet(id){
         <tr><td>Tipo de Cliente</td><td>${selTCliD}</td></tr>
         <tr><td>Localidade</td><td>${o.localidade||"—"}</td></tr>
         <tr><td>País</td><td>${badgeHtml(o.pais)} ${o.pais}</td></tr>
-        <tr><td>Dono</td><td>${o.dono||"—"}</td></tr>
+        <tr><td>Dono</td><td>${_esc(o.dono||"—")}</td></tr>
         <tr><td>Área</td><td>${inpArea}</td></tr>
         <tr><td>Valor Contrato</td><td style="font-family:'DM Mono',monospace">${fE(o.valor)}</td></tr>
         <tr><td>Prazo Inicial</td><td>${inpPrazo}</td></tr>
@@ -5112,7 +5223,7 @@ function updCampoObra(id,campo,val){
   const o=obras.find(x=>x.id===id)||arquivadas.find(x=>x.id===id);if(!o)return;
   const antes=o[campo];
   if(campo==='prazo'||campo==='prorrogacao'){o[campo]=parseInt(val)||0;}
-  else if(campo==='trabalhos_mais'||campo==='trabalhos_mais_extra'){o[campo]=parseFloat(val)||0;}
+  else if(campo==='trabalhos_mais'||campo==='trabalhos_mais_extra'){o[campo]=_numPT(val);}
   else{o[campo]=val;}
   if(window.markObraDirty)markObraDirty(id);
   salvar();
@@ -5125,8 +5236,11 @@ function updCampoObra(id,campo,val){
 function delExecDet(id,mes){
   if(!confirm(`Eliminar registo de ${mes}?`))return;
   const o=obras.find(x=>x.id===id);
+  if(!o){ showToast('Obra não encontrada.', true); return; }
   o.execucoes=o.execucoes.filter(e=>e.mes!==mes);
+  _apagarExecucaoDB(id,mes);
   salvar();renderDet(id);renderExec();
+  showToast(`✓ Registo de ${mes} eliminado`);
 }
 
 // ══════════════════════════════════════════════════════════
@@ -5232,7 +5346,7 @@ function cancelForm(){
 
 function exportObra(id){
   const o=obras.find(x=>x.id===id)||arquivadas.find(x=>x.id===id);if(!o)return;
-  const{jsPDF}=window.jspdf;const doc=new jsPDF();
+  if(!window.jspdf){alert('Biblioteca PDF (jsPDF) não carregada. Verifique a ligação à internet e recarregue a página.');return;} const{jsPDF}=window.jspdf;const doc=new jsPDF();
   const hoje=new Date().toLocaleDateString("pt-PT");
   const cc=calcObra(o);const pi=calcPrazoInfo(o);
   doc.setFillColor(15,17,23);doc.rect(0,0,210,297,"F");
@@ -5409,7 +5523,8 @@ function renderDashHist(){
   const cefM=ms.map(m=>obras.filter(o=>o.grupo==="II"&&o.estado!=="Concluído").reduce((s,o)=>{const ex=o.execucoes?.find(e=>e.mes===m);if(!ex)return s;const tm=ex.trabalhos_mais_mes||o.trabalhos_mais||0;const vt=o.valor+tm;return s+(vt-vt*ex.percentagem/100);},0));
   charts.histval=mkChart("ch-hist-val","bar",{labels:mL,datasets:[{data:vM,backgroundColor:"#4f8ef7",borderRadius:3}]},{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>fE(c.raw)}}},scales:{y:{beginAtZero:true,ticks:{color:"#6b7280",callback:v=>fE(v)},grid:{color:"#e2e6ef"}},x:{ticks:{color:"#4a5568"},grid:{display:false}}}});
   charts.histn=mkChart("ch-hist-n","line",{labels:mL,datasets:[{data:nM,borderColor:"#c084fc",backgroundColor:"rgba(192,132,252,.1)",tension:.4,fill:true,pointRadius:3}]},{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.raw+" obra(s)"}}},scales:{y:{beginAtZero:true,ticks:{color:"#6b7280"},grid:{color:"#e2e6ef"}},x:{ticks:{color:"#4a5568"},grid:{display:false}}}});
-  charts.histpais=mkChart("ch-hist-pais","bar",{labels:Object.keys(ppais),datasets:[{data:Object.values(ppais).map(d=>d.n?Math.round(d.v/d.n):0),backgroundColor:Object.keys(ppais).map(p=>cors[p]||"#8892aa"),borderRadius:4}]},{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>fE(c.raw)+" médio"}}},scales:{y:{beginAtZero:true,ticks:{color:"#6b7280",callback:v=>fE(v)},grid:{color:"#e2e6ef"}},x:{ticks:{color:"#4a5568"},grid:{display:false}}}});
+  const _palHP=["#4f8ef7","#38d9a9","#f5a623","#c084fc","#e05c5c","#3ec9d6","#f5d442","#8892aa","#ff8fab","#7dd3fc","#a3e635","#fb923c"];
+  charts.histpais=mkChart("ch-hist-pais","bar",{labels:Object.keys(ppais),datasets:[{data:Object.values(ppais).map(d=>d.n?d.v/d.n:0),backgroundColor:Object.keys(ppais).map((p,i)=>cors[p]||_palHP[i%_palHP.length]),borderRadius:4}]},{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>fE(c.raw)+" médio"}}},scales:{y:{beginAtZero:true,ticks:{color:"#6b7280",callback:v=>fE(v)},grid:{color:"#e2e6ef"}},x:{ticks:{color:"#4a5568"},grid:{display:false}}}});
   charts.histconc=mkChart("ch-hist-conc","bar",{labels:anosC,datasets:[{data:anosC.map(a=>cpA[a]),backgroundColor:"#38d9a9",borderRadius:4}]},{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{color:"#6b7280"},grid:{color:"#e2e6ef"}},x:{ticks:{color:"#4a5568"},grid:{display:false}}}});
   charts.histcef=mkChart("ch-hist-cef","line",{labels:mL,datasets:[{data:cefM,borderColor:"#e05c5c",backgroundColor:"rgba(224,92,92,.1)",tension:.35,fill:true,pointRadius:3}]},{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>fE(c.raw)}}},scales:{y:{beginAtZero:true,ticks:{color:"#6b7280",callback:v=>fE(v)},grid:{color:"#e2e6ef"}},x:{ticks:{color:"#4a5568"},grid:{display:false}}}});
 
@@ -5442,7 +5557,7 @@ function exportExecCSV(){
 }
 // ── exportGlobal com gráficos ──────────────────────────
 function exportGlobal(){
-  const{jsPDF}=window.jspdf;
+  if(!window.jspdf){alert('Biblioteca PDF (jsPDF) não carregada. Verifique a ligação à internet e recarregue a página.');return;} const{jsPDF}=window.jspdf;
   const doc=new jsPDF({orientation:"landscape"});
   const hoje=new Date().toLocaleDateString("pt-PT");
   const gi=obras.filter(o=>o.grupo==="I"),gii=obras.filter(o=>o.grupo==="II");
@@ -5586,7 +5701,7 @@ window.exportarInteligenciaPDF = exportarInteligenciaPDF;
 //   quando um bloco completo não cabe (não corta gráficos/grupos)
 // ────────────────────────────────────────────────────────────
 async function _pdfCaptura(panel, titulo){
-  const {jsPDF}=window.jspdf;
+  if(!window.jspdf){alert('Biblioteca PDF (jsPDF) não carregada. Verifique a ligação à internet e recarregue a página.');return;} const {jsPDF}=window.jspdf;
   const mesAno=_mesAnoAtual();
   _expShow('A renderizar...');
 
@@ -7225,6 +7340,7 @@ function _toDB(p){
     data_entrega: p.data_entrega||null, data_decisao: p.data_decisao||null,
     observacoes: p.observacoes||null,
     timeline: p.timeline||[], revisoes: p.revisoes||[], documentos: p.documentos||[],
+    habilitacao: p.habilitacao||[],
     obra_id: p.obra_id||null, obra_codigo: p.obra_codigo||null,
     arquivada: !!p.arquivadaEm, arquivada_em: p.arquivadaEm||null,
     atualizado_por: window._user ? window._user.id : null
@@ -7264,6 +7380,7 @@ async function syncPropostaToDB(p){
   } else {
     if(window._syncEnd) window._syncEnd(false);
   }
+  window._localWriteAt = Date.now();
 }
 async function deletePropostaFromDB(id){
   if(!window._user || !window.sb) return;
@@ -7290,7 +7407,7 @@ function duplicarProposta(id){
   c.data_entrega = ""; c.data_adjudicacao = ""; c.data_decisao = ""; c.data_rececao = ""; c.data_limite = ""; c.data_revisao = "";
   c.obra_id = ""; c.obra_codigo = "";
   c.timeline = []; c.revisoes = []; c.num_revisoes = 0; c.revisao_atual = "";
-  c.arquivada_em = null;
+  c.arquivadaEm = null;
   c.criado_em = new Date().toISOString();
   c.ultima_alteracao = new Date().toISOString();
   // mantém: cliente, dono, concorrente, país, valores estimados, margem, prazo, responsável e a checklist de habilitação
@@ -7321,7 +7438,7 @@ function arquivarProposta(id){
         id:"ev_"+Date.now()+"_"+Math.random().toString(36).slice(2,6), tipo:"Alteração de Proposta",
         descricao:"Proposta arquivada", quando:new Date().toISOString(), utilizador:utilizadorActual()
       });
-      pp.arquivada_em = new Date().toISOString();
+      pp.arquivadaEm = new Date().toISOString();
       arquivadas.push(pp);
       if(detalheAtual===pid){ try{ fecharDetalhe(); }catch(e){} }
       nArq++;
@@ -7348,7 +7465,7 @@ function arquivarProposta(id){
     id:"ev_"+Date.now()+"_"+Math.random().toString(36).slice(2,6), tipo:"Alteração de Proposta",
     descricao:"Proposta arquivada", quando:new Date().toISOString(), utilizador:utilizadorActual()
   });
-  p.arquivada_em = new Date().toISOString();
+  p.arquivadaEm = new Date().toISOString();
   propostas = propostas.filter(function(x){return x.id!==id;});
   arquivadas.push(p);
   window._lastPropostaEdited = p;
@@ -7371,7 +7488,7 @@ function restaurarProposta(id){
     id:"ev_"+Date.now()+"_"+Math.random().toString(36).slice(2,6), tipo:"Alteração de Proposta",
     descricao:"Proposta restaurada do arquivo", quando:new Date().toISOString(), utilizador:utilizadorActual()
   });
-  delete p.arquivada_em;
+  p.arquivadaEm = null;
   arquivadas = arquivadas.filter(function(x){return x.id!==id;});
   propostas.push(p);
   window._lastPropostaEdited = p;
@@ -7967,7 +8084,7 @@ function renderArquivo(){
       if(anoColapsado) return;
       lista.forEach(function(p){
         var valor = p.valor_revisto||p.valor_proposta||p.valor_estimado;
-        var arqData = p.arquivada_em ? fmtData(p.arquivada_em.slice(0,10)) : "—";
+        var arqData = p.arquivadaEm ? fmtData(p.arquivadaEm.slice(0,10)) : "—";
         var acoes = '<button class="orc-btn sm" onclick="ORC.detalhe(\''+p.id+'\')">Abrir</button>';
         if(editavel) acoes += ' <button class="orc-btn ac2 sm" title="Restaurar" onclick="ORC.restaurar(\''+p.id+'\')">↩ Restaurar</button>';
         if(editavel) acoes += ' <button class="orc-btn dg sm" title="Eliminar definitivamente" onclick="ORC.eliminarArq(\''+p.id+'\')">×</button>';
@@ -8444,7 +8561,7 @@ function guardarCampoInline(id, campo, valor){
   var p = propostas.find(function(x){return x.id===id;});
   if(!p) return;
   if(campo==="valor_proposta"){
-    p[campo] = parseFloat(valor)||0;
+    p[campo] = (typeof _numPT==="function") ? _numPT(valor) : (parseFloat(valor)||0);
   } else {
     p[campo] = valor;
   }
@@ -9331,15 +9448,25 @@ function exportarExcel(){
     "Estado","Prioridade","Concorrente","Data Recepção","Data Limite","Data Entrega",
     "Data Decisão","Data Adjudicação","Valor Estimado","Valor Proposta","Valor Revisto",
     "Margem %","Probabilidade %","Prazo (meses)","Revisão Actual","Nº Revisões",
-    "Obra Ligada","Nº Eventos","Nº Documentos"];
+    "Obra Ligada","Nº Eventos","Nº Documentos",
+    "Classificação","Valor Vencedor","Δ vs Vencedor"];
   var linhas = arr.map(function(p){
+    // Resultado do concurso: classificação, vencedor e diferença
+    var _cls = (typeof _calcClassificacao==='function') ? _calcClassificacao(p) : null;
+    var _rc = p.resultado_concurso || [];
+    var _venc = _rc.filter(function(r){return !r.excluido;})
+                   .sort(function(a,b){return (parseFloat(a.valor)||0)-(parseFloat(b.valor)||0);})[0];
+    var _vvenc = _venc ? (parseFloat(_venc.valor)||0) : (parseFloat(p.valor_vencedor)||0);
+    var _nossa = _rc.find(function(r){return r.proprio;});
+    var _dvenc = (_nossa && _vvenc) ? ((parseFloat(_nossa.valor)||0) - _vvenc) : "";
     return [p.codigo||"", p.designacao||"", p.cliente||"", p.pais||"", p.localidade||"",
       p.dono||"", p.gestor||"", p.estado||"", p.prioridade||"", p.concorrente||"",
       p.data_rececao||"", p.data_limite||"", p.data_entrega||"", p.data_decisao||"",
       p.data_adjudicacao||"", parseFloat(p.valor_estimado)||0, parseFloat(p.valor_proposta)||0,
       parseFloat(p.valor_revisto)||0, parseFloat(p.margem)||0, parseFloat(p.probabilidade)||0,
       parseInt(p.prazo)||0, p.revisao_atual||"", (p.revisoes||[]).length,
-      p.obra_codigo||"", (p.timeline||[]).length, (p.documentos||[]).length];
+      p.obra_codigo||"", (p.timeline||[]).length, (p.documentos||[]).length,
+      _cls?(_cls+"º"):"", _vvenc||"", _dvenc];
   });
   var ws = XLSX.utils.aoa_to_sheet([cabec].concat(linhas));
   // largura de colunas
@@ -9658,6 +9785,7 @@ function importValidar(){
       if(tipo==="num"){
         var n = impNumero(bruto);
         if(n==="__INVALIDO__"){ leves.push("valor inválido em "+cdef.label+" (fica vazio)"); obj[campo]=""; }
+        else if(typeof n==="number" && n<0){ leves.push("valor negativo em "+cdef.label+" (fica vazio)"); obj[campo]=""; }
         else obj[campo] = (n==null?"":n);
       } else if(tipo==="data"){
         var dt = impData(bruto);
@@ -9889,9 +10017,9 @@ function renderResultado(p, editavel){
       var dif1 = v - v1;
       var pct1 = v1 ? (dif1/v1*100) : 0;
       var cor1 = dif1===0?"var(--ac2)":(dif1>0?"var(--dg)":"var(--ac2)");
-      // diferença para o seguinte (próximo na lista de válidos)
-      var posIdx = valoresOrdenados.indexOf(v);
-      var vSeg = posIdx>0 ? valoresOrdenados[posIdx-1] : null;  // anterior = mais barato
+      // diferença para o seguinte (posição anterior na lista de válidos)
+      // Usa a posição real da linha (pos) em vez de indexOf, que falharia com valores empatados.
+      var vSeg = pos>1 ? valoresOrdenados[pos-2] : null;  // anterior = mais barato
       if(temPontuacao) vSeg = null; // com pontuação, "seguinte" não faz sentido simples
       var difSegHTML = "—";
       if(vSeg!=null && pos>1){
@@ -10362,7 +10490,7 @@ window.ORC = {
   aplicarPredefinicoes: aplicarPredefinicoes,
   editarCelula: editarCelula,
   renderArquivo: renderArquivo,
-  arqBusca: function(v){ _arqBusca = v||""; renderArquivo(); },
+  arqBusca: function(v){ _arqBusca = v||""; clearTimeout(window._debTimers&&window._debTimers.arq); if(!window._debTimers)window._debTimers={}; window._debTimers.arq=setTimeout(function(){renderArquivo();},180); },
   _dados: function(){ return propostas; },  // para depuração
   _arqSel: {},
   arqSelAll: function(){
@@ -10828,7 +10956,7 @@ function frMoedaDoPais(){
 }
 function frFP(n){if(n==null||isNaN(n))return'–';return new Intl.NumberFormat('pt-PT',{minimumFractionDigits:2,maximumFractionDigits:2}).format(n)+'%';}
 function frFdt(el,did){var v=el.value||'';var d=frG(did);if(!d)return;if(!v){d.textContent='';return;}var dt=new Date(v+'T00:00:00');d.textContent=('0'+dt.getDate()).slice(-2)+'.'+('0'+(dt.getMonth()+1)).slice(-2)+'.'+dt.getFullYear();}
-function frGP(c){return parseFloat(String(c.preco||'').replace(/\s/g,'').replace(',','.'))||0;}
+function frGP(c){ if(typeof frNum==='function'){ var n=frNum(c.preco); return n==null?0:n; } return parseFloat(String(c.preco||'').replace(/\s/g,'').replace(',','.'))||0; }
 function frGPz(c){return parseInt(c.prazo)||0;}
 function frOrd(){return frConc.filter(function(c){return frGP(c)>0;}).sort(function(a,b){return frGP(a)-frGP(b);});}
 function frAddC(nm,pr,pz,ob,ns){frConc.push({id:'c'+(++frUid),nome:nm||'',preco:pr!=null?pr:'',prazo:pz!=null?pz:'',obs:ob||'',nossa:!!ns});frRender();}
@@ -11013,7 +11141,7 @@ function frGuardar(){
     return {
       id: c.id,
       entidade: c.nome,
-      valor: parseFloat(String(c.preco).replace(',','.'))||0,
+      valor: (typeof frNum==='function' ? (frNum(c.preco)||0) : (parseFloat(String(c.preco).replace(',','.'))||0)),
       prazo: parseInt(c.prazo)||null,
       pontuacao: null,
       obs: c.obs||'',
@@ -11059,14 +11187,27 @@ function frNum(s){
   if(s==null) return null;
   s = String(s).replace(/€/g,'').replace(/\s/g,'').trim();
   if(!s || /NA|#|seleccionar/i.test(s)) return null;
-  // formato PT: ponto=milhar, vírgula=decimal
-  s = s.replace(/\./g,'').replace(',','.');
+  var hasDot = s.indexOf('.')>=0, hasComma = s.indexOf(',')>=0;
+  if(hasDot && hasComma){
+    // o último separador é o decimal
+    if(s.lastIndexOf(',') > s.lastIndexOf('.')) s = s.replace(/\./g,'').replace(',','.'); // PT: 1.234,56
+    else s = s.replace(/,/g,'');                                                          // anglo: 1,234.56
+  } else if(hasComma){
+    s = s.replace(',','.');  // só vírgula → decimal PT
+  } // só ponto → já é decimal (anglo)
   var n = parseFloat(s);
   return isNaN(n) ? null : n;
 }
 
 // ── Aplicar valores extraídos à folha ───────────────────────────
 function frAplicarExtraidos(d){
+  // Confirmar antes de sobrepor dados já preenchidos no formulário
+  var jaTem = false;
+  try{
+    var _dz=frG('fr-f-desig'), _bz=frG('fr-f-base');
+    if((_dz&&(_dz.value||'').trim()) || (_bz&&(_bz.value||'').trim()) || (typeof frConc!=='undefined'&&frConc&&frConc.length)) jaTem=true;
+  }catch(e){}
+  if(jaTem && !confirm('O formulário já tem dados preenchidos.\nImportar vai substituir os campos detetados no ficheiro.\n\nContinuar?')) return;
   function setF(id,val){ if(val!=null && val!==''){ var e=frG(id); if(e){ e.value=val; } } }
   setF('fr-f-num', d.num);   if(d.num){ var dn=frG('fr-d-num'); if(dn)dn.textContent=d.num; }
   setF('fr-f-ref', d.ref);
@@ -11123,26 +11264,42 @@ function frSelByText(sel, txt){
 // ── IMPORTAR PDF (pdf.js, baseado em posições) ──────────────────
 function frImportarPDF(file){
   if(!window.pdfjsLib){ alert('Biblioteca de PDF não carregada. Verifica a ligação à internet.'); return; }
+  if(window.showLoading) window.showLoading();
   var reader = new FileReader();
   reader.onload = function(e){
     var typed = new Uint8Array(e.target.result);
     pdfjsLib.getDocument({data:typed}).promise.then(function(pdf){
-      return pdf.getPage(1).then(function(page){
-        return page.getTextContent().then(function(tc){
-          // items: cada um tem str e transform [a,b,c,d,x,y]
-          var items = tc.items.map(function(it){
-            return { s: it.str, x: it.transform[4], y: it.transform[5] };
-          }).filter(function(it){ return it.s.trim()!==''; });
-          var d = frParsePDFItems(items);
-          frAplicarExtraidos(d);
-          if(typeof window.ORC._toastFn==='function') window.ORC._toastFn('✓ PDF importado — confirma os dados e ajusta o que faltar');
-          else alert('✓ PDF importado. Confirma os dados.');
-        });
+      // Ler TODAS as páginas (não só a 1ª). Desloca o y por página para
+      // manter a ordem topo->fundo e evitar colisões entre páginas.
+      var items = [];
+      var seq = Promise.resolve();
+      var N = pdf.numPages;
+      for(var pn=1; pn<=N; pn++){
+        (function(pageNum){
+          seq = seq.then(function(){
+            return pdf.getPage(pageNum).then(function(page){
+              return page.getTextContent().then(function(tc){
+                tc.items.forEach(function(it){
+                  if(it.str.trim()!=='') items.push({ s: it.str, x: it.transform[4], y: it.transform[5] + (N-pageNum)*100000 });
+                });
+              });
+            });
+          });
+        })(pn);
+      }
+      return seq.then(function(){
+        var d = frParsePDFItems(items);
+        if(window.hideLoading) window.hideLoading();
+        frAplicarExtraidos(d);
+        if(typeof window.ORC._toastFn==='function') window.ORC._toastFn('✓ PDF importado ('+N+' pág.) — confirma os dados e ajusta o que faltar');
+        else alert('✓ PDF importado ('+N+' páginas). Confirma os dados.');
       });
     }).catch(function(err){
+      if(window.hideLoading) window.hideLoading();
       alert('Erro ao ler o PDF: '+err.message);
     });
   };
+  reader.onerror = function(){ if(window.hideLoading) window.hideLoading(); alert('Erro ao ler o ficheiro.'); };
   reader.readAsArrayBuffer(file);
 }
 
